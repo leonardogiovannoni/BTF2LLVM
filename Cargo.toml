@@ -1,7 +1,9 @@
 [package]
-name = "btf_dumper"
+name = "btf2llvm"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libbpf-rs = "0.23.2"
+llvm-sys = "140.0.0"
+nom = "7.1.3"
+inkwell = { version = "0.5", features = ["llvm14-0-force-dynamic"] }
