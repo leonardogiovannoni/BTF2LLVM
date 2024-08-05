@@ -111,11 +111,11 @@ impl<'ctx> CodeGen<'ctx> {
             InnerType::Fwd(_fwd) => {
                 todo!()
             }
-            &InnerType::Typedef(type_id) => self.llvm_type_from_parsed_type(type_id, types),
-            &InnerType::Volatile(type_id) => self.llvm_type_from_parsed_type(type_id, types),
-            &InnerType::Const(type_id) => self.llvm_type_from_parsed_type(type_id, types),
-            &InnerType::Restrict(type_id) => self.llvm_type_from_parsed_type(type_id, types),
-            &InnerType::Function { type_id, .. } => self.llvm_type_from_parsed_type(type_id, types),
+            &InnerType::Typedef(type_id)      |
+            &InnerType::Volatile(type_id)     |
+            &InnerType::Const(type_id)        |
+            &InnerType::Restrict(type_id)     |
+            &InnerType::Function { type_id, .. }      => self.llvm_type_from_parsed_type(type_id, types),
             InnerType::FunctionProto { ret, args } => {
                 let ret_type = self.llvm_type_from_parsed_type(*ret, types)?;
                 let ret_type: BasicTypeEnum = convert_to_basic_type(ret_type).unwrap();

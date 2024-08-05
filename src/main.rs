@@ -2,8 +2,9 @@ use inkwell::context::Context;
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
 use nom::error::ErrorKind;
-use nom::multi::count;
+use nom::multi::{count, fold_many0};
 use nom::number::Endianness;
+use nom::sequence::preceded;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Not;
@@ -27,7 +28,7 @@ struct Header {
     type_off: u32,
     type_len: u32,
     str_off: u32,
-    _str_len: u32,
+    str_len: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -141,7 +142,6 @@ struct Type<'a> {
     ty: InnerType<'a>,
 }
 
-
 #[derive(Clone, Debug, Default)]
 pub enum InnerType<'a> {
     Array {
@@ -177,8 +177,6 @@ pub enum InnerType<'a> {
         args: Vec<FunctionParam<'a>>,
     },
     Fwd(Fwd),
-    #[default]
-    Void,
     Integer {
         used_bits: usize,
         bits: usize,
@@ -202,20 +200,22 @@ pub enum InnerType<'a> {
         linkage: Linkage,
         type_id: usize,
     },
+    #[default]
+    Void,
     Volatile(usize),
 }
 
 fn parse_header(input: &[u8], en: Endianness) -> IResult<&[u8], Header> {
     map(
         tuple((u8, u8, u32(en), u32(en), u32(en), u32(en), u32(en))),
-        |(_version, _flags, hdr_len, type_off, type_len, str_off, _str_len)| Header {
+        |(_version, _flags, _hdr_len, type_off, type_len, str_off, str_len)| Header {
             _version,
             _flags,
-            _hdr_len: hdr_len,
+            _hdr_len,
             type_off,
             type_len,
             str_off,
-            _str_len,
+            str_len,
         },
     )(input)
 }
@@ -235,14 +235,12 @@ fn read_str<'a>(
         ))),
     }
 }
-
 fn parse_type_info<'a>(
     input: &'a [u8],
-    en: Endianness,
     strings: &'a [u8],
+    en: Endianness,
 ) -> IResult<&'a [u8], (TypeKind, TypeInfo<'a>)> {
     let (input, (name_off, info, size_or_type)) = tuple((u32(en), u32(en), u32(en)))(input)?;
-
     let (input, name) = read_str(input, strings, name_off)?;
     let kind: TypeKind = ((info >> 24) & 0x1f).try_into().unwrap();
     let (size, ref_type) = match kind {
@@ -323,9 +321,9 @@ fn parse_array(input: &[u8], en: Endianness) -> IResult<&[u8], InnerType> {
     Ok((
         input,
         InnerType::Array {
-            elem_type_id : elem_type_id as usize,
+            elem_type_id: elem_type_id as usize,
             index_type_id: index_type_id as usize,
-            num_elements : num_elements as usize,
+            num_elements: num_elements as usize,
         },
     ))
 }
@@ -419,7 +417,7 @@ fn parse_struct_member<'a>(
     let (input, offset_and_bits) = u32(en)(input)?;
 
     let (offset, bits) = if type_info.kind_flag {
-        (offset_and_bits & 0xFFFFFF, Some(offset_and_bits >> 24))
+        (offset_and_bits & 0x00FF_FFFF, Some(offset_and_bits >> 24))
     } else {
         (offset_and_bits, None)
     };
@@ -530,10 +528,7 @@ fn parse_decl_tag<'a>(
     ))
 }
 
-fn parse_section_variable(
-    input: &[u8],
-    en: Endianness,
-) -> IResult<&[u8], SectionVariable> {
+fn parse_section_variable(input: &[u8], en: Endianness) -> IResult<&[u8], SectionVariable> {
     let (input, type_id) = u32(en)(input)?;
     let (input, offset) = u32(en)(input)?;
     let (input, size) = u32(en)(input)?;
@@ -568,16 +563,23 @@ fn parse_type<'a>(
     en: Endianness,
 ) -> IResult<&'a [u8], InnerType<'a>> {
     match kind {
-        TypeKind::Void => Ok((input, InnerType::Void)),
-        TypeKind::Integer => parse_integer(input, type_info, en),
-        TypeKind::Pointer => Ok((
-            input,
-            InnerType::Pointer(type_info.ref_type.unwrap() as usize),
-        )),
         TypeKind::Array => parse_array(input, en),
-        TypeKind::Struct => parse_struct(input, type_info, strings, en),
-        TypeKind::Union => parse_union(input, type_info, strings, en),
+        TypeKind::Const => Ok((
+            input,
+            InnerType::Const(type_info.ref_type.unwrap() as usize),
+        )),
+        TypeKind::DataSection => parse_data_section(input, type_info, en),
+        TypeKind::DeclTag => parse_decl_tag(input, type_info, en),
         TypeKind::Enum32 => parse_enum32(input, type_info, strings, en),
+        TypeKind::Enum64 => parse_enum64(input, type_info, strings, en),
+        TypeKind::Float => Ok((
+            input,
+            InnerType::Float {
+                bits: type_info.size.unwrap() as usize * 8,
+            },
+        )),
+        TypeKind::Function => parse_function(input, type_info),
+        TypeKind::FunctionProto => parse_function_proto(input, type_info, strings, en),
         TypeKind::Fwd => Ok((
             input,
             InnerType::Fwd(if type_info.kind_flag {
@@ -586,38 +588,31 @@ fn parse_type<'a>(
                 Fwd::Struct
             }),
         )),
-        TypeKind::Typedef => Ok((
+        TypeKind::Integer => parse_integer(input, type_info, en),
+        TypeKind::Pointer => Ok((
             input,
-            InnerType::Typedef(type_info.ref_type.unwrap() as usize),
-        )),
-        TypeKind::Volatile => Ok((
-            input,
-            InnerType::Volatile(type_info.ref_type.unwrap() as usize),
-        )),
-        TypeKind::Const => Ok((
-            input,
-            InnerType::Const(type_info.ref_type.unwrap() as usize),
+            InnerType::Pointer(type_info.ref_type.unwrap() as usize),
         )),
         TypeKind::Restrict => Ok((
             input,
             InnerType::Restrict(type_info.ref_type.unwrap() as usize),
         )),
-        TypeKind::Function => parse_function(input, type_info),
-        TypeKind::FunctionProto => parse_function_proto(input, type_info, strings, en),
-        TypeKind::Variable => parse_variable(input, type_info, en),
-        TypeKind::DataSection => parse_data_section(input, type_info, en),
-        TypeKind::Float => Ok((
-            input,
-            InnerType::Float {
-                bits: type_info.size.unwrap() as usize * 8,
-            },
-        )),
-        TypeKind::DeclTag => parse_decl_tag(input, type_info, en),
+        TypeKind::Struct => parse_struct(input, type_info, strings, en),
         TypeKind::TypeTag => Ok((
             input,
             InnerType::TypeTag(type_info.ref_type.unwrap() as usize),
         )),
-        TypeKind::Enum64 => parse_enum64(input, type_info, strings, en),
+        TypeKind::Typedef => Ok((
+            input,
+            InnerType::Typedef(type_info.ref_type.unwrap() as usize),
+        )),
+        TypeKind::Union => parse_union(input, type_info, strings, en),
+        TypeKind::Variable => parse_variable(input, type_info, en),
+        TypeKind::Void => Ok((input, InnerType::Void)),
+        TypeKind::Volatile => Ok((
+            input,
+            InnerType::Volatile(type_info.ref_type.unwrap() as usize),
+        )),
     }
 }
 
@@ -628,48 +623,45 @@ fn parse_types<'a>(
     strings: &'a [u8],
     en: Endianness,
 ) -> IResult<&'a [u8], Vec<Type<'a>>> {
-    let (mut input, _) = take(type_off)(input)?;
-    let (end, _) = take(type_len)(input)?;
-    let mut types = vec![Type::<'a>::default()];
-    let input = loop {
-        let (scan, (kind, type_info)) = parse_type_info(input, en, strings)?;
-        let (scan, ty) = parse_type(scan, kind, &type_info, strings, en)?;
-        types.push(Type {
-            name: type_info.name,
-            ty,
-        });
-        input = scan;
+    let (remaining_input, types) = preceded(take(type_off), take(type_len))(input)?;
+    let (_, parsed_types) = fold_many0(
+        |i| {
+            let (next_input, (kind, type_info)) = parse_type_info(i, strings, en)?;
+            let (final_input, ty) = parse_type(next_input, kind, &type_info, strings, en)?;
+            Ok((
+                final_input,
+                Type {
+                    name: type_info.name,
+                    ty,
+                },
+            ))
+        },
+        || vec![Type::default()], // Initial accumulator
+        |mut acc, item| {
+            acc.push(item);
+            acc
+        },
+    )(types)?;
 
-        // TODO check better error
-        if input == end {
-            break input;
-        }
-    };
-
-    Ok((input, types))
+    Ok((remaining_input, parsed_types))
 }
 
 fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
     let (input, magic) = u16(Endianness::Little)(input)?;
-    Ok((
-        input,
-        match magic {
-            0xeb9f => Endianness::Little,
-            0x9feb => Endianness::Big,
-            _ => {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    ErrorKind::Tag,
-                )))
-            }
-        },
-    ))
+    match magic {
+        0xeb9f => Ok((input, Endianness::Little)),
+        0x9feb => Ok((input, Endianness::Big)),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            ErrorKind::Tag,
+        ))),
+    }
 }
 
 fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     let (input, en) = parse_magic(input)?;
     let (input, header) = parse_header(input, en)?;
-    let (strings, _) = take(header.str_off as usize)(input)?;
+    let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
     let (input, types) = parse_types(
         input,
         header.type_off as usize,
@@ -707,10 +699,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let vfs_read = types
         .iter()
-        .position(|t| t.name == Some("vfs_read"))
+        .position(|ty| ty.name == Some("vfs_read"))
         .unwrap();
 
-    let signature = generate_function_signature(vfs_read, &types, &ctx).unwrap();
+    let signature = generate_function_signature(vfs_read, &types, &ctx)?;
     println!("{}", signature);
 
     Ok(())
