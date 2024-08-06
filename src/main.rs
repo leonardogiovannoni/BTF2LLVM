@@ -636,7 +636,7 @@ fn parse_types<'a>(
                 },
             ))
         },
-        || vec![Type::default()], // Initial accumulator
+        || vec![Type::default()],
         |mut acc, item| {
             acc.push(item);
             acc
@@ -657,6 +657,35 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
         ))),
     }
 }
+
+/*
+fn parse_strings<'a>(input: &'a [u8], str_off: usize, str_len: usize) -> IResult<&'a [u8], HashMap<usize, &'a str>> {
+    let (_, strings) = preceded(take(str_off), take(str_len))(input)?;
+    let mut offset = 0;
+    let (_, parsed_types) = fold_many0(
+        |strings: &'a [u8]| {
+            let (strings, res) = take_until("\0")(strings)?;
+            // skip by 1 byte
+            let (strings, _) = take(1usize)(strings)?;
+
+            let prev_offset = offset;
+            offset += res.len() + 1;
+            let res = std::str::from_utf8(res).unwrap();
+            Ok((
+                strings,
+                (prev_offset, res)
+            ))
+        },
+        || HashMap::new(),
+        |mut acc, (offset, item)| {
+            acc.insert(offset, item);
+            acc
+        },
+    )(strings)?;
+
+    Ok((input, parsed_types))
+}
+*/
 
 fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     let (input, en) = parse_magic(input)?;
@@ -699,7 +728,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let vfs_read = types
         .iter()
-        .position(|ty| ty.name == Some("vfs_read"))
+        .position(|ty| ty.name == Some("vfs_statx")) //"vfs_read"))
         .unwrap();
 
     let signature = generate_function_signature(vfs_read, &types, &ctx)?;
