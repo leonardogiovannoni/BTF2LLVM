@@ -1,3 +1,6 @@
+use anyhow::bail;
+use anyhow::Result;
+use cxx::{CxxString, CxxVector};
 use inkwell::context::Context;
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
@@ -8,7 +11,6 @@ use nom::sequence::preceded;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Not;
-
 use nom::Finish;
 use nom::{
     bytes::complete::take_until,
@@ -658,34 +660,6 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
     }
 }
 
-/*
-fn parse_strings<'a>(input: &'a [u8], str_off: usize, str_len: usize) -> IResult<&'a [u8], HashMap<usize, &'a str>> {
-    let (_, strings) = preceded(take(str_off), take(str_len))(input)?;
-    let mut offset = 0;
-    let (_, parsed_types) = fold_many0(
-        |strings: &'a [u8]| {
-            let (strings, res) = take_until("\0")(strings)?;
-            // skip by 1 byte
-            let (strings, _) = take(1usize)(strings)?;
-
-            let prev_offset = offset;
-            offset += res.len() + 1;
-            let res = std::str::from_utf8(res).unwrap();
-            Ok((
-                strings,
-                (prev_offset, res)
-            ))
-        },
-        || HashMap::new(),
-        |mut acc, (offset, item)| {
-            acc.insert(offset, item);
-            acc
-        },
-    )(strings)?;
-
-    Ok((input, parsed_types))
-}
-*/
 
 fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     let (input, en) = parse_magic(input)?;
@@ -701,45 +675,70 @@ fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     Ok((input, types))
 }
 
-#[derive(Debug)]
-struct ParserError {
-    error: nom::error::ErrorKind,
-}
 
-impl Display for ParserError {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "ParserError: {:?}", self.error)
-    }
-}
-
-impl Error for ParserError {}
-
-fn get_btf_types(data: &[u8]) -> Result<Vec<Type>, ParserError> {
+fn get_btf_types(data: &[u8]) -> Result<Vec<Type>> {
     parse(data)
         .finish()
         .map(|(_, types)| types)
-        .map_err(|e| ParserError { error: e.code })
+        .map_err(|e| anyhow::anyhow!("error parsing btf: {:?}", e.code ))
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let s = std::fs::read("/sys/kernel/btf/vmlinux")?;
-    let types = get_btf_types(&s)?;
+
+fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<Vec<String>> {
+    let s = std::fs::read("/sys/kernel/btf/vmlinux").unwrap();
+    let mut res = Vec::with_capacity(functions.size_hint().0);
+    let types = get_btf_types(&s).unwrap();
     let ctx = Context::create();
-
-    let vfs_read = types
-        .iter()
-        .position(|ty| ty.name == Some("vfs_statx")) //"vfs_read"))
-        .unwrap();
-
-    let signature = generate_function_signature(vfs_read, &types, &ctx)?;
-    println!("{}", signature);
-
-    Ok(())
+    
+    for (index, name) in functions.enumerate() {
+        if name.is_empty() {
+            bail!("function at index {} is not valid", index);
+        }
+        let fun_index = types
+            .iter()
+            .position(|ty| ty.name == Some(&name));
+        let Some(fun_index) = fun_index else {
+            bail!("function {} not found", name);
+        };
+        let signature = generate_function_signature(fun_index, &types, &ctx);
+        let Ok(signature) = signature else {
+            bail!("failed to generate signature for function {}", name);
+        };
+        res.push(signature);
+    }
+    Ok(res)
 }
 
-fn main2() -> Result<(), Box<dyn Error>> {
-    let s = std::fs::read("/sys/kernel/btf/vmlinux")?;
-    let types = get_btf_types(&s)?;
-    println!("{:?}", types);
-    Ok(())
+
+fn get_signatures(functions: &CxxVector<CxxString>) -> Result<Vec<String>> {
+    let iter = functions.iter().map(|x| 
+        match x.to_str() {
+            Ok(s) => s,
+            Err(_) => "" 
+        }
+    );
+    get_signatures_impl(iter)
 }
+
+
+#[cxx::bridge(namespace = btf2llvm)]
+pub mod ffi {
+    extern "Rust" {
+        pub fn get_signatures(functions: &CxxVector<CxxString>) -> Result<Vec<String>>;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test1() {
+        // TODO
+    }
+
+
+}
+
+
+
