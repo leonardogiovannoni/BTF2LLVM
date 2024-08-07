@@ -1,7 +1,6 @@
 use std::error::Error;
 
 use inkwell::context::Context;
-use inkwell::data_layout::DataLayout;
 use inkwell::module::Module;
 use inkwell::targets::{TargetData, TargetTriple};
 use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
@@ -25,7 +24,8 @@ pub fn generate_function_signature(
 
 pub fn generate_function_signature(
     function_id: usize,
-    types: &Vec<Type>,
+    name: &str,
+    types: &[Type],
     context: &Context,
 ) -> Result<String, Box<dyn Error>> {
     let code_gen = CodeGen::new(context);
@@ -33,7 +33,7 @@ pub fn generate_function_signature(
     if let AnyTypeEnum::FunctionType(function_type) = res {
         let function = code_gen
             .module
-            .add_function("vfs_read", function_type, None);
+            .add_function(name, function_type, None);
         let block = context.append_basic_block(function, "entry");
         let builder = context.create_builder();
         builder.position_at_end(block);
@@ -84,7 +84,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn llvm_type_from_parsed_type(
         &self,
         type_id: usize,
-        types: &Vec<Type>,
+        types: &[Type],
     ) -> Result<AnyTypeEnum<'ctx>, Box<dyn Error>> {
         let ty = &types[type_id];
         match &ty.ty {
