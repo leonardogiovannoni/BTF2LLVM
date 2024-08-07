@@ -1,13 +1,14 @@
 use std::error::Error;
 
 use inkwell::context::Context;
+use inkwell::data_layout::DataLayout;
 use inkwell::module::Module;
-use inkwell::targets::TargetTriple;
+use inkwell::targets::{TargetData, TargetTriple};
 use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 
 use crate::{InnerType, Type};
-
+/*
 pub fn generate_function_signature(
     function_id: usize,
     types: &Vec<Type>,
@@ -20,6 +21,29 @@ pub fn generate_function_signature(
     };
     binary.module.add_function("main", function_type, None);
     Ok(res.to_string())
+}*/
+
+pub fn generate_function_signature(
+    function_id: usize,
+    types: &Vec<Type>,
+    context: &Context,
+) -> Result<String, Box<dyn Error>> {
+    let code_gen = CodeGen::new(context);
+    let res = code_gen.llvm_type_from_parsed_type(function_id, types)?;
+    if let AnyTypeEnum::FunctionType(function_type) = res {
+        let function = code_gen
+            .module
+            .add_function("vfs_read", function_type, None);
+        let block = context.append_basic_block(function, "entry");
+        let builder = context.create_builder();
+        builder.position_at_end(block);
+        builder.build_unreachable().unwrap();
+        code_gen.module.verify().unwrap();
+        let res = code_gen.module.print_to_string().to_string_lossy().to_string();
+        Ok(res)
+    } else {
+        Err("Expected function type".into())
+    }
 }
 
 pub struct CodeGen<'ctx> {
@@ -42,9 +66,18 @@ fn convert_to_basic_type(ty: AnyTypeEnum<'_>) -> Option<BasicTypeEnum<'_>> {
 }
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
-        let triple = TargetTriple::create("x86_64-unknown-linux-gnu");
+        /*let triple = TargetTriple::create("x86_64-unknown-linux-gnu");
         let module = context.create_module("dummy");
         module.set_triple(&triple);
+        Self { module, context }*/
+        let triple = TargetTriple::create("x86_64-pc-linux-gnu");
+        let target_data = TargetData::create(
+            "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
+        );
+
+        let module = context.create_module("unnamed.ll");
+        module.set_triple(&triple);
+        module.set_data_layout(&target_data.get_data_layout());
         Self { module, context }
     }
 

@@ -734,7 +734,8 @@ mod tests {
 
     #[test]
     fn test1() {
-        // TODO
+        let tmp = get_signatures_impl(vec!["vfs_read"].into_iter()).unwrap();
+        println!("{}", tmp[0]);
     }
 
 
