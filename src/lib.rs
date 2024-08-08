@@ -1,3 +1,4 @@
+#![feature(const_option)]
 use anyhow::bail;
 use anyhow::Result;
 use cxx::{CxxString, CxxVector};
@@ -8,9 +9,6 @@ use nom::error::ErrorKind;
 use nom::multi::{count, fold_many0};
 use nom::number::Endianness;
 use nom::sequence::preceded;
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::ops::Not;
 use nom::Finish;
 use nom::{
     bytes::complete::take_until,
@@ -19,6 +17,8 @@ use nom::{
     sequence::tuple,
     IResult,
 };
+use std::ops::Not;
+use std::usize;
 mod codegen;
 use codegen::generate_function_signature;
 
@@ -58,33 +58,45 @@ enum TypeKind {
     Enum64 = 19,
 }
 
-impl TryFrom<u32> for TypeKind {
+macro_rules! match_enum_variants {
+    ( $value:expr, $( $variant:ident ),* ) => {
+        match $value {
+            $(
+                x if x == TypeKind::$variant as usize => Some(TypeKind::$variant),
+            )*
+            _ => None,
+        }
+    };
+}
+
+impl TryFrom<usize> for TypeKind {
     type Error = ();
 
-    fn try_from(value: u32) -> Result<Self, ()> {
-        match value {
-            x if x == TypeKind::Array as u32 => Ok(TypeKind::Array),
-            x if x == TypeKind::Const as u32 => Ok(TypeKind::Const),
-            x if x == TypeKind::DataSection as u32 => Ok(TypeKind::DataSection),
-            x if x == TypeKind::DeclTag as u32 => Ok(TypeKind::DeclTag),
-            x if x == TypeKind::Enum32 as u32 => Ok(TypeKind::Enum32),
-            x if x == TypeKind::Enum64 as u32 => Ok(TypeKind::Enum64),
-            x if x == TypeKind::Float as u32 => Ok(TypeKind::Float),
-            x if x == TypeKind::Function as u32 => Ok(TypeKind::Function),
-            x if x == TypeKind::FunctionProto as u32 => Ok(TypeKind::FunctionProto),
-            x if x == TypeKind::Fwd as u32 => Ok(TypeKind::Fwd),
-            x if x == TypeKind::Integer as u32 => Ok(TypeKind::Integer),
-            x if x == TypeKind::Pointer as u32 => Ok(TypeKind::Pointer),
-            x if x == TypeKind::Restrict as u32 => Ok(TypeKind::Restrict),
-            x if x == TypeKind::Struct as u32 => Ok(TypeKind::Struct),
-            x if x == TypeKind::TypeTag as u32 => Ok(TypeKind::TypeTag),
-            x if x == TypeKind::Typedef as u32 => Ok(TypeKind::Typedef),
-            x if x == TypeKind::Union as u32 => Ok(TypeKind::Union),
-            x if x == TypeKind::Variable as u32 => Ok(TypeKind::Variable),
-            x if x == TypeKind::Void as u32 => Ok(TypeKind::Void),
-            x if x == TypeKind::Volatile as u32 => Ok(TypeKind::Volatile),
-            _ => Err(()),
-        }
+    fn try_from(value: usize) -> Result<Self, ()> {
+        match_enum_variants!(
+            value,
+            Array,
+            Const,
+            DataSection,
+            DeclTag,
+            Enum32,
+            Enum64,
+            Float,
+            Function,
+            FunctionProto,
+            Fwd,
+            Integer,
+            Pointer,
+            Restrict,
+            Struct,
+            TypeTag,
+            Typedef,
+            Union,
+            Variable,
+            Void,
+            Volatile
+        )
+        .ok_or(())
     }
 }
 
@@ -95,6 +107,61 @@ struct TypeInfo<'a> {
     kind_flag: bool,
     size: Option<u32>,
     ref_type: Option<u32>,
+}
+impl<'a> TypeInfo<'a> {
+    // try to move fail at compile time
+    const fn size_safe<const KIND: usize>(&self) -> usize {
+        const {
+            assert!(
+                match_enum_variants!(KIND, Enum32, Enum64, Float, Integer, Struct, Union).is_some()
+            )
+        };
+        return self.size.unwrap() as usize;
+    }
+
+    const fn ref_type_safe<const KIND: usize>(&self) -> usize {
+        const {
+            assert!(match_enum_variants!(
+                KIND,
+                Const,
+                DeclTag,
+                Function,
+                FunctionProto,
+                Pointer,
+                Restrict,
+                TypeTag,
+                Typedef,
+                Variable,
+                Volatile
+            )
+            .is_some())
+        };
+        return self.ref_type.unwrap() as usize;
+    }
+
+    fn get_size_or_type(kind: TypeKind, size_or_type: u32) -> (Option<u32>, Option<u32>) {
+        match kind {
+            TypeKind::Enum32
+            | TypeKind::Enum64
+            | TypeKind::Float
+            | TypeKind::Integer
+            | TypeKind::Struct
+            | TypeKind::Union => (Some(size_or_type), None),
+
+            TypeKind::Const
+            | TypeKind::DeclTag
+            | TypeKind::Function
+            | TypeKind::FunctionProto
+            | TypeKind::Pointer
+            | TypeKind::Restrict
+            | TypeKind::TypeTag
+            | TypeKind::Typedef
+            | TypeKind::Variable
+            | TypeKind::Volatile => (None, Some(size_or_type)),
+
+            _ => (None, None),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -244,28 +311,10 @@ fn parse_type_info<'a>(
 ) -> IResult<&'a [u8], (TypeKind, TypeInfo<'a>)> {
     let (input, (name_off, info, size_or_type)) = tuple((u32(en), u32(en), u32(en)))(input)?;
     let (input, name) = read_str(input, strings, name_off)?;
-    let kind: TypeKind = ((info >> 24) & 0x1f).try_into().unwrap();
-    let (size, ref_type) = match kind {
-        TypeKind::Enum32
-        | TypeKind::Enum64
-        | TypeKind::Float
-        | TypeKind::Integer
-        | TypeKind::Struct
-        | TypeKind::Union => (Some(size_or_type), None),
-
-        TypeKind::Const
-        | TypeKind::DeclTag
-        | TypeKind::Function
-        | TypeKind::FunctionProto
-        | TypeKind::Pointer
-        | TypeKind::Restrict
-        | TypeKind::TypeTag
-        | TypeKind::Typedef
-        | TypeKind::Variable
-        | TypeKind::Volatile => (None, Some(size_or_type)),
-
-        _ => (None, None),
-    };
+    let kind: TypeKind = ((info as usize >> 24) & 0x1f)
+        .try_into()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Tag)))?;
+    let (size, ref_type) = TypeInfo::get_size_or_type(kind, size_or_type);
 
     let type_info = TypeInfo {
         name,
@@ -276,6 +325,7 @@ fn parse_type_info<'a>(
     };
     Ok((input, (kind, type_info)))
 }
+
 fn parse_integer<'a>(
     input: &'a [u8],
     type_info: &TypeInfo<'a>,
@@ -290,7 +340,7 @@ fn parse_integer<'a>(
     Ok((
         input,
         InnerType::Integer {
-            bits: type_info.size.unwrap() as usize * 8,
+            bits: type_info.size_safe::<{ TypeKind::Integer as usize }>() * 8,
             used_bits: bits.into(),
             is_signed,
             is_char,
@@ -310,7 +360,7 @@ fn parse_function<'a>(input: &'a [u8], type_info: &TypeInfo) -> IResult<&'a [u8]
         input,
         InnerType::Function {
             linkage,
-            type_id: type_info.ref_type.unwrap() as usize,
+            type_id: type_info.ref_type_safe::<{ TypeKind::Function as usize }>() as usize,
         },
     ))
 }
@@ -376,7 +426,7 @@ fn parse_enum32<'a>(
     let is_signed = type_info.kind_flag;
     let num_entries = type_info.vlen as usize;
     let (input, entries) = count(|i| parse_enum_entry32(i, strings, en), num_entries)(input)?;
-    let bytes = type_info.size.unwrap() as usize;
+    let bytes = type_info.size_safe::<{ TypeKind::Enum32 as usize }>();
     Ok((
         input,
         InnerType::Enum32 {
@@ -396,7 +446,7 @@ fn parse_enum64<'a>(
     let is_signed = type_info.kind_flag;
     let num_entries = type_info.vlen as usize;
     let (input, entries) = count(|i| parse_enum_entry64(i, strings, en), num_entries)(input)?;
-    let bytes = type_info.size.unwrap() as usize;
+    let bytes = type_info.size_safe::<{ TypeKind::Enum64 as usize }>();
     Ok((
         input,
         InnerType::Enum64 {
@@ -446,7 +496,7 @@ fn parse_struct<'a>(
         |input| parse_struct_member(input, type_info, strings, en),
         num_members as usize,
     )(input)?;
-    let bytes = type_info.size.unwrap() as usize;
+    let bytes = type_info.size_safe::<{ TypeKind::Struct as usize }>();
     Ok((
         input,
         InnerType::Struct {
@@ -467,7 +517,7 @@ fn parse_union<'a>(
         |input| parse_struct_member(input, type_info, strings, en),
         num_members as usize,
     )(input)?;
-    let bytes = type_info.size.unwrap() as usize;
+    let bytes = type_info.size_safe::<{ TypeKind::Union as usize }>();
     Ok((
         input,
         InnerType::Union {
@@ -495,7 +545,7 @@ fn parse_function_proto<'a>(
     en: Endianness,
 ) -> IResult<&'a [u8], InnerType<'a>> {
     let num_params = type_info.vlen as usize;
-    let ret = type_info.ref_type.unwrap() as usize;
+    let ret = type_info.ref_type_safe::<{ TypeKind::FunctionProto as usize }>();
     let (input, args) = count(|i| parse_function_param(i, strings, en), num_params)(input)?;
     Ok((input, InnerType::FunctionProto { ret, args }))
 }
@@ -510,7 +560,7 @@ fn parse_variable<'a>(
         1 => Ok(Linkage::Global),
         _ => Err(nom::error::ErrorKind::Tag),
     })(input)?;
-    let type_id = type_info.ref_type.unwrap() as usize;
+    let type_id = type_info.ref_type_safe::<{ TypeKind::Variable as usize }>();
     Ok((input, InnerType::Variable { type_id, linkage }))
 }
 
@@ -520,7 +570,7 @@ fn parse_decl_tag<'a>(
     en: Endianness,
 ) -> IResult<&'a [u8], InnerType<'a>> {
     let (input, component_index) = u32(en)(input)?;
-    let type_id = type_info.ref_type.unwrap() as usize;
+    let type_id = type_info.ref_type_safe::<{ TypeKind::DeclTag as usize }>();
     Ok((
         input,
         InnerType::DeclTag {
@@ -568,7 +618,7 @@ fn parse_type<'a>(
         TypeKind::Array => parse_array(input, en),
         TypeKind::Const => Ok((
             input,
-            InnerType::Const(type_info.ref_type.unwrap() as usize),
+            InnerType::Const(type_info.ref_type_safe::<{ TypeKind::Const as usize }>()),
         )),
         TypeKind::DataSection => parse_data_section(input, type_info, en),
         TypeKind::DeclTag => parse_decl_tag(input, type_info, en),
@@ -577,7 +627,7 @@ fn parse_type<'a>(
         TypeKind::Float => Ok((
             input,
             InnerType::Float {
-                bits: type_info.size.unwrap() as usize * 8,
+                bits: type_info.size_safe::<{ TypeKind::Float as usize }>() * 8,
             },
         )),
         TypeKind::Function => parse_function(input, type_info),
@@ -593,27 +643,27 @@ fn parse_type<'a>(
         TypeKind::Integer => parse_integer(input, type_info, en),
         TypeKind::Pointer => Ok((
             input,
-            InnerType::Pointer(type_info.ref_type.unwrap() as usize),
+            InnerType::Pointer(type_info.ref_type_safe::<{ TypeKind::Pointer as usize }>()),
         )),
         TypeKind::Restrict => Ok((
             input,
-            InnerType::Restrict(type_info.ref_type.unwrap() as usize),
+            InnerType::Restrict(type_info.ref_type_safe::<{ TypeKind::Restrict as usize }>()),
         )),
         TypeKind::Struct => parse_struct(input, type_info, strings, en),
         TypeKind::TypeTag => Ok((
             input,
-            InnerType::TypeTag(type_info.ref_type.unwrap() as usize),
+            InnerType::TypeTag(type_info.ref_type_safe::<{ TypeKind::TypeTag as usize }>()),
         )),
         TypeKind::Typedef => Ok((
             input,
-            InnerType::Typedef(type_info.ref_type.unwrap() as usize),
+            InnerType::Typedef(type_info.ref_type_safe::<{ TypeKind::Typedef as usize }>()),
         )),
         TypeKind::Union => parse_union(input, type_info, strings, en),
         TypeKind::Variable => parse_variable(input, type_info, en),
         TypeKind::Void => Ok((input, InnerType::Void)),
         TypeKind::Volatile => Ok((
             input,
-            InnerType::Volatile(type_info.ref_type.unwrap() as usize),
+            InnerType::Volatile(type_info.ref_type_safe::<{ TypeKind::Volatile as usize }>()),
         )),
     }
 }
@@ -660,7 +710,6 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
     }
 }
 
-
 fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     let (input, en) = parse_magic(input)?;
     let (input, header) = parse_header(input, en)?;
@@ -675,28 +724,25 @@ fn parse(input: &[u8]) -> IResult<&[u8], Vec<Type>> {
     Ok((input, types))
 }
 
-
 fn get_btf_types(data: &[u8]) -> Result<Vec<Type>> {
     parse(data)
         .finish()
         .map(|(_, types)| types)
-        .map_err(|e| anyhow::anyhow!("error parsing btf: {:?}", e.code ))
+        .map_err(|e| anyhow::anyhow!("error parsing btf: {:?}", e.code))
 }
 
-
 fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<Vec<String>> {
-    let s = std::fs::read("/sys/kernel/btf/vmlinux").unwrap();
+    let s = std::fs::read("/sys/kernel/btf/vmlinux")
+        .map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
     let mut res = Vec::with_capacity(functions.size_hint().0);
-    let types = get_btf_types(&s).unwrap();
+    let types = get_btf_types(&s)?;
     let ctx = Context::create();
-    
+
     for (index, name) in functions.enumerate() {
         if name.is_empty() {
             bail!("function at index {} is not valid", index);
         }
-        let fun_index = types
-            .iter()
-            .position(|ty| ty.name == Some(&name));
+        let fun_index = types.iter().position(|ty| ty.name == Some(&name));
         let Some(fun_index) = fun_index else {
             bail!("function {} not found", name);
         };
@@ -709,17 +755,13 @@ fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<V
     Ok(res)
 }
 
-
 fn get_signatures(functions: &CxxVector<CxxString>) -> Result<Vec<String>> {
-    let iter = functions.iter().map(|x| 
-        match x.to_str() {
-            Ok(s) => s,
-            Err(_) => "" 
-        }
-    );
+    let iter = functions.iter().map(|x| match x.to_str() {
+        Ok(s) => s,
+        Err(_) => "",
+    });
     get_signatures_impl(iter)
 }
-
 
 #[cxx::bridge(namespace = btf2llvm)]
 pub mod ffi {
@@ -737,9 +779,4 @@ mod tests {
         let tmp = get_signatures_impl(vec!["vfs_read"].into_iter()).unwrap();
         println!("{}", tmp[0]);
     }
-
-
 }
-
-
-

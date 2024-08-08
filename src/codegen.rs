@@ -1,49 +1,36 @@
 use std::error::Error;
 
+use crate::{InnerType, Type};
+use anyhow::{bail, Result};
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{TargetData, TargetTriple};
 use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 
-use crate::{InnerType, Type};
-/*
-pub fn generate_function_signature(
-    function_id: usize,
-    types: &Vec<Type>,
-    context: &Context,
-) -> Result<String, Box<dyn Error>> {
-    let binary = CodeGen::new(context);
-    let res = binary.llvm_type_from_parsed_type(function_id, types)?;
-    let AnyTypeEnum::FunctionType(function_type) = res else {
-        return Err("Expected function type".into());
-    };
-    binary.module.add_function("main", function_type, None);
-    Ok(res.to_string())
-}*/
-
 pub fn generate_function_signature(
     function_id: usize,
     name: &str,
     types: &[Type],
     context: &Context,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<String> {
     let code_gen = CodeGen::new(context);
     let res = code_gen.llvm_type_from_parsed_type(function_id, types)?;
-    if let AnyTypeEnum::FunctionType(function_type) = res {
-        let function = code_gen
-            .module
-            .add_function(name, function_type, None);
-        let block = context.append_basic_block(function, "entry");
-        let builder = context.create_builder();
-        builder.position_at_end(block);
-        builder.build_unreachable().unwrap();
-        code_gen.module.verify().unwrap();
-        let res = code_gen.module.print_to_string().to_string_lossy().to_string();
-        Ok(res)
-    } else {
-        Err("Expected function type".into())
-    }
+    let AnyTypeEnum::FunctionType(function_type) = res else {
+        bail!("Expected function type")
+    };
+    let function = code_gen.module.add_function(name, function_type, None);
+    let block = context.append_basic_block(function, "entry");
+    let builder = context.create_builder();
+    builder.position_at_end(block);
+    builder.build_unreachable().map_err(|e| anyhow::anyhow!(e))?;
+    code_gen.module.verify().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let res = code_gen
+        .module
+        .print_to_string()
+        .to_string_lossy()
+        .to_string();
+    Ok(res)
 }
 
 pub struct CodeGen<'ctx> {
@@ -85,7 +72,7 @@ impl<'ctx> CodeGen<'ctx> {
         &self,
         type_id: usize,
         types: &[Type],
-    ) -> Result<AnyTypeEnum<'ctx>, Box<dyn Error>> {
+    ) -> Result<AnyTypeEnum<'ctx>> {
         let ty = &types[type_id];
         match &ty.ty {
             // Type::Void => Ok(context.void_type().into()),
@@ -119,7 +106,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
             InnerType::Struct { .. } => {
                 let Some(name) = ty.name else {
-                    return Err("Struct without name aren't supported".into());
+                    bail!("Struct without name aren't supported");
                 };
                 let name = format!("struct.{}", name);
                 Ok(AnyTypeEnum::StructType(
@@ -128,7 +115,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
             InnerType::Union { .. } => {
                 let Some(name) = ty.name else {
-                    return Err("Union without name aren't supported".into());
+                    bail!("Union without name aren't supported");
                 };
                 let name = format!("union.{}", name);
                 Ok(AnyTypeEnum::StructType(
@@ -136,13 +123,13 @@ impl<'ctx> CodeGen<'ctx> {
                 ))
             }
             InnerType::Enum32 { .. } => {
-                todo!()
+                bail!("Enum32 not supported")
             }
             InnerType::Enum64 { .. } => {
-                todo!()
+                bail!("Enum64 not supported")
             }
             InnerType::Fwd(_fwd) => {
-                todo!()
+                bail!("Fwd not supported")
             }
             &InnerType::Typedef(type_id)
             | &InnerType::Volatile(type_id)
@@ -153,7 +140,9 @@ impl<'ctx> CodeGen<'ctx> {
             }
             InnerType::FunctionProto { ret, args } => {
                 let ret_type = self.llvm_type_from_parsed_type(*ret, types)?;
-                let ret_type: BasicTypeEnum = convert_to_basic_type(ret_type).unwrap();
+                let ret_type: BasicTypeEnum = convert_to_basic_type(ret_type).ok_or_else(|| {
+                    anyhow::anyhow!("Unsupported return type for function")
+                })?;
                 let arg_types: Vec<BasicMetadataTypeEnum> = args
                     .iter()
                     .map(|arg| {
@@ -165,7 +154,7 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(ret_type.fn_type(&arg_types, false).into())
             }
 
-            _ => Err("Unsupported type conversion".into()),
+            _ => bail!("Unsupported type {:?}", ty),
         }
     }
 }
