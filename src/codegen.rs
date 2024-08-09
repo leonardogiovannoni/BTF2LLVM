@@ -23,8 +23,13 @@ pub fn generate_function_signature(
     let block = context.append_basic_block(function, "entry");
     let builder = context.create_builder();
     builder.position_at_end(block);
-    builder.build_unreachable().map_err(|e| anyhow::anyhow!(e))?;
-    code_gen.module.verify().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    builder
+        .build_unreachable()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    code_gen
+        .module
+        .verify()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let res = code_gen
         .module
         .print_to_string()
@@ -75,7 +80,7 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> Result<AnyTypeEnum<'ctx>> {
         let ty = &types[type_id];
         match &ty.ty {
-            // Type::Void => Ok(context.void_type().into()),
+            InnerType::Void => Ok(self.context.void_type().into()),
             &InnerType::Integer {
                 // used_bits,
                 bits,
@@ -139,19 +144,24 @@ impl<'ctx> CodeGen<'ctx> {
                 self.llvm_type_from_parsed_type(type_id, types)
             }
             InnerType::FunctionProto { ret, args } => {
-                let ret_type = self.llvm_type_from_parsed_type(*ret, types)?;
-                let ret_type: BasicTypeEnum = convert_to_basic_type(ret_type).ok_or_else(|| {
-                    anyhow::anyhow!("Unsupported return type for function")
-                })?;
                 let arg_types: Vec<BasicMetadataTypeEnum> = args
                     .iter()
                     .map(|arg| {
                         self.llvm_type_from_parsed_type(arg.type_id as usize, types)
                             .unwrap_or_else(|_| self.context.i8_type().into())
                     })
-                    .map(|x| convert_to_basic_type(x).unwrap_or_else(|| self.context.i8_type().into()).into())
+                    .map(|x| {
+                        convert_to_basic_type(x)
+                            .unwrap_or_else(|| self.context.i8_type().into())
+                            .into()
+                    })
                     .collect::<Vec<BasicMetadataTypeEnum>>();
-                Ok(ret_type.fn_type(&arg_types, false).into())
+
+                let ret_type = self.llvm_type_from_parsed_type(*ret, types)?;
+                match convert_to_basic_type(ret_type) {
+                    Some(ret_type) => Ok(ret_type.fn_type(&arg_types, false).into()),
+                    None => Ok(self.context.void_type().fn_type(&arg_types, false).into()),
+                }
             }
 
             _ => bail!("Unsupported type {:?}", ty),

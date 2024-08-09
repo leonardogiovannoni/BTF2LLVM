@@ -747,10 +747,7 @@ fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<V
             bail!("function {} not found", name);
         };
         let signature = generate_function_signature(fun_index, name, &types, &ctx);
-        let Ok(signature) = signature else {
-            bail!("failed to generate signature for function {}", name);
-        };
-        res.push(signature);
+        res.push(signature?);
     }
     Ok(res)
 }
