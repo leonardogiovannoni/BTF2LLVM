@@ -149,7 +149,7 @@ impl<'ctx> CodeGen<'ctx> {
                         self.llvm_type_from_parsed_type(arg.type_id as usize, types)
                             .unwrap_or_else(|_| self.context.i8_type().into())
                     })
-                    .map(|x| convert_to_basic_type(x).unwrap().into())
+                    .map(|x| convert_to_basic_type(x).unwrap_or_else(|| self.context.i8_type().into()).into())
                     .collect::<Vec<BasicMetadataTypeEnum>>();
                 Ok(ret_type.fn_type(&arg_types, false).into())
             }

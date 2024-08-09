@@ -1,5 +1,4 @@
 #include "btf2llvm/src/lib.rs.h"
-#include <iostream>
 #include <vector>
 #include <string>
 #include <expected>
@@ -9,6 +8,31 @@ std::expected<std::vector<std::string>, std::string> GetSignatures(const std::ve
     try
     {
         ::rust::Vec<::rust::String> res = btf2llvm::get_signatures(functions);
+        std::vector<std::string> result{};
+        result.reserve(res.size());
+        for (const auto &s : res)
+        {
+            result.push_back((std::string) s);
+        }
+        return result;
+    }
+    catch (const std::exception &e)
+    {
+        return std::unexpected(e.what());
+    }
+    return std::unexpected("Something went wrong");
+}
+
+/*std::expected<std::vector<std::string>, std::string> GetSignatures(const std::vector<std::string> &functions)
+{
+
+    ::rust::Vec<::rust::String> res = btf2llvm::get_signatures(functions);
+    // this method use an hack
+    if (functions.size() != res.size()) {
+        assert(functions.size() + 1 == res.size());
+        std::string error = std::string(auto{res.back()});
+        return std::unexpected(error);
+    } else {
         std::vector<std::string> result;
         for (const auto &s : res)
         {
@@ -17,8 +41,5 @@ std::expected<std::vector<std::string>, std::string> GetSignatures(const std::ve
         }
         return result;
     }
-    catch (const std::exception &e)
-    {
-        return std::unexpected(e.what());
-    }
 }
+ */

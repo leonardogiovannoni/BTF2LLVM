@@ -763,6 +763,24 @@ fn get_signatures(functions: &CxxVector<CxxString>) -> Result<Vec<String>> {
     get_signatures_impl(iter)
 }
 
+/*
+fn get_signatures(functions: &CxxVector<CxxString>) -> Vec<String> {
+    let iter = functions.iter().map(|x| match x.to_str() {
+        Ok(s) => s,
+        Err(_) => "",
+    });
+    match get_signatures_impl(iter) {
+        Ok(r) => r,
+        Err(e) => {
+            let error = e.to_string();
+            let mut res = vec![String::new(); functions.len()];
+            res.push(error);
+            res
+        }
+    }
+} */
+
+
 #[cxx::bridge(namespace = btf2llvm)]
 pub mod ffi {
     extern "Rust" {
