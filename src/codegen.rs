@@ -58,18 +58,7 @@ fn convert_to_basic_type(ty: AnyTypeEnum<'_>) -> Option<BasicTypeEnum<'_>> {
 }
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
-        /*let triple = TargetTriple::create("x86_64-unknown-linux-gnu");
-        let module = context.create_module("dummy");
-        module.set_triple(&triple);
-        Self { module, context }*/
-        let triple = TargetTriple::create("x86_64-pc-linux-gnu");
-        let target_data = TargetData::create(
-            "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
-        );
-
         let module = context.create_module("unnamed.ll");
-        module.set_triple(&triple);
-        module.set_data_layout(&target_data.get_data_layout());
         Self { module, context }
     }
 
