@@ -1,10 +1,8 @@
-use std::error::Error;
 
 use crate::{InnerType, Type};
 use anyhow::{bail, Result};
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::targets::{TargetData, TargetTriple};
 use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 
@@ -58,7 +56,7 @@ fn convert_to_basic_type(ty: AnyTypeEnum<'_>) -> Option<BasicTypeEnum<'_>> {
 }
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
-        let module = context.create_module("unnamed.ll");
+        let module = context.create_module("");
         Self { module, context }
     }
 
