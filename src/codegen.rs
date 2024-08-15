@@ -18,7 +18,7 @@ pub fn generate_function_signature(
         bail!("Expected function type")
     };
     let function = code_gen.module.add_function(name, function_type, None);
-    let block = context.append_basic_block(function, "entry");
+    let block = context.append_basic_block(function, "");
     let builder = context.create_builder();
     builder.position_at_end(block);
     builder
