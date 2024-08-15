@@ -304,6 +304,7 @@ fn read_str<'a>(
         ))),
     }
 }
+
 fn parse_type_info<'a>(
     input: &'a [u8],
     strings: &'a [u8],

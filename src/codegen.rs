@@ -32,6 +32,7 @@ pub fn generate_function_signature(
         .module
         .print_to_string()
         .to_string_lossy()
+        .trim()
         .to_string();
     Ok(res)
 }
