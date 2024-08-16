@@ -1,5 +1,6 @@
 
-use crate::{InnerType, Type};
+
+use crate::btf::{Type, InnerType};
 use anyhow::{bail, Result};
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -7,7 +8,7 @@ use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnu
 use inkwell::AddressSpace;
 
 pub fn generate_function_signature(
-    function_id: usize,
+    function_id: u32,
     name: &str,
     types: &[Type],
     context: &Context,
@@ -63,10 +64,10 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn llvm_type_from_parsed_type(
         &self,
-        type_id: usize,
+        type_id: u32,
         types: &[Type],
     ) -> Result<AnyTypeEnum<'ctx>> {
-        let ty = &types[type_id];
+        let ty = &types[type_id as usize];
         match &ty.ty {
             InnerType::Void => Ok(self.context.void_type().into()),
             &InnerType::Integer {
@@ -75,7 +76,7 @@ impl<'ctx> CodeGen<'ctx> {
                 //is_signed,
                 ..
             } => Ok(AnyTypeEnum::IntType(
-                self.context.custom_width_int_type(bits as u32),
+                self.context.custom_width_int_type(bits),
             )),
             &InnerType::Pointer(type_id) => {
                 let ty = self.llvm_type_from_parsed_type(type_id, types)?;
@@ -94,7 +95,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let elem_ty: BasicTypeEnum =
                     convert_to_basic_type(elem_ty).unwrap_or_else(|| self.context.i8_type().into());
                 Ok(AnyTypeEnum::ArrayType(
-                    elem_ty.array_type(num_elements as u32),
+                    elem_ty.array_type(num_elements),
                 ))
             }
             InnerType::Struct { .. } => {
@@ -135,7 +136,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let arg_types: Vec<BasicMetadataTypeEnum> = args
                     .iter()
                     .map(|arg| {
-                        self.llvm_type_from_parsed_type(arg.type_id as usize, types)
+                        self.llvm_type_from_parsed_type(arg.type_id, types)
                             .unwrap_or_else(|_| self.context.i8_type().into())
                     })
                     .map(|x| {
