@@ -778,6 +778,19 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
     }
 }
 
+fn create_lookup<'a>(types: &[Type<'a>]) -> FxHashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>> {
+    let mut names_lookup = FxHashMap::with_capacity_and_hasher(types.len(), Default::default());
+    for (i, ty) in types.iter().enumerate() {
+        if let Some(name) = ty.name {
+            let name = ty.name.unwrap_or_default();
+            let kind = ty.kind();
+            let tmp: &mut SmallVec<[(u32, TypeKind); 1]> =
+                names_lookup.entry(name).or_insert(Default::default());
+            tmp.push((i as u32, kind));
+        }
+    }
+    names_lookup
+}
 
 
 fn parse(
@@ -788,17 +801,8 @@ fn parse(
     let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
     let (input, types) = parse_types(input, header.type_off, header.type_len, strings, en)?;
 
-    let mut name_lookup = FxHashMap::with_capacity_and_hasher(types.len(), Default::default());
-    for (i, ty) in types.iter().enumerate() {
-        if let Some(name) = ty.name {
-            let name = ty.name.unwrap_or_default();
-            let kind = ty.kind();
-            let tmp: &mut SmallVec<[(u32, TypeKind); 1]> =
-                name_lookup.entry(name).or_insert(Default::default());
-            tmp.push((i as u32, kind));
-        }
-    }
-    Ok((input, (types, name_lookup)))
+    let names_lookup = create_lookup(&types);
+    Ok((input, (types, names_lookup)))
 }
 
 fn get_btf_types(
@@ -831,7 +835,7 @@ impl BtfCell {
         &self.borrow_dependent().0
     }
 
-    fn name_lookup(&self) -> &FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>> {
+    fn names_lookup(&self) -> &FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>> {
         &self.borrow_dependent().1
     }
 }
@@ -851,7 +855,7 @@ impl Btf {
     }
 
     pub fn type_index_by_name(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
-        let Some(types_per_name) = self.0.name_lookup().get(name) else {
+        let Some(types_per_name) = self.0.names_lookup().get(name) else {
             return Ok(None);
         };
         let Some((index, type_index)) = types_per_name
@@ -863,7 +867,7 @@ impl Btf {
             return Ok(None);
         };
         if types_per_name[index + 1..].iter().find(|(_, k)| *k == kind).is_some() {
-            bail!("Nope");
+            bail!("Not unique type found for name: {}", name);
         };
         Ok(Some(type_index))
     }
