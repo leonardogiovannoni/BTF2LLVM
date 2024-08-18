@@ -1,9 +1,9 @@
 #![feature(const_option)]
+
 use anyhow::bail;
 use anyhow::Result;
 use cxx::{CxxString, CxxVector};
 use inkwell::context::Context;
-
 mod btf;
 use btf::Btf;
 mod codegen;
@@ -19,7 +19,7 @@ fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<V
         if name.is_empty() {
             bail!("function at index {} is not valid", index);
         }
-        let fun_index = btf.types().iter().position(|ty| ty.name == Some(name));
+        let fun_index = btf.type_index_by_name(name, btf::TypeKind::Function).unwrap();
         let Some(fun_index) = fun_index else {
             bail!("function {} not found", name);
         };
@@ -60,13 +60,14 @@ pub mod ffi {
 
 #[cfg(test)]
 mod tests {
-    use btf::InnerType;
+    use btf::{InnerType, TypeKind};
+    use smallvec::SmallVec;
 
     use super::*;
 
     #[test]
     fn test1() {
-        println!("{}", size_of::<InnerType>());
+        println!("{}", size_of::<SmallVec<[(u32, TypeKind); 1]>>());
         let tmp = get_signatures_impl(vec!["vfs_read"].into_iter()).unwrap();
         println!("{}", tmp[0]);
     }

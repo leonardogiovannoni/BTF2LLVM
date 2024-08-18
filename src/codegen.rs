@@ -56,6 +56,7 @@ fn convert_to_basic_type(ty: AnyTypeEnum<'_>) -> Option<BasicTypeEnum<'_>> {
         AnyTypeEnum::VoidType(_void_type) => None,
     }
 }
+
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
         let module = context.create_module("");
