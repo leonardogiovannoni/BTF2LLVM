@@ -792,7 +792,6 @@ fn create_lookup<'a>(types: &[Type<'a>]) -> FxHashMap<&'a str, SmallVec<[(u32, T
     names_lookup
 }
 
-
 fn parse(
     input: &[u8],
 ) -> IResult<&[u8], (Vec<Type>, FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>>)> {
@@ -851,7 +850,7 @@ impl Btf {
     }
 
     pub fn types(&self) -> &[Type<'_>] {
-        &self.0.types()
+        self.0.types()
     }
 
     pub fn type_index_by_name(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
@@ -866,7 +865,7 @@ impl Btf {
         else {
             return Ok(None);
         };
-        if types_per_name[index + 1..].iter().find(|(_, k)| *k == kind).is_some() {
+        if types_per_name[index + 1..].iter().any(|(_, k)| *k == kind) {
             bail!("Not unique type found for name: {}", name);
         };
         Ok(Some(type_index))

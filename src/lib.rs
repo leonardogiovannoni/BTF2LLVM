@@ -23,7 +23,7 @@ fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<V
         let Some(fun_index) = fun_index else {
             bail!("function {} not found", name);
         };
-        let signature = generate_function_signature(fun_index as u32, name, btf.types(), &ctx);
+        let signature = generate_function_signature(fun_index, name, btf.types(), &ctx);
         res.push(signature?);
     }
     Ok(res)
