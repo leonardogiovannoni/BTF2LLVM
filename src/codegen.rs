@@ -1,6 +1,4 @@
-
-
-use crate::btf::{Type, InnerType};
+use crate::btf::{InnerType, Type};
 use anyhow::{bail, Result};
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -65,10 +63,10 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn llvm_type_from_parsed_type(
         &self,
-        type_id: u32,
+        type_index: u32,
         types: &[Type],
     ) -> Result<AnyTypeEnum<'ctx>> {
-        let ty = &types[type_id as usize];
+        let ty = &types[type_index as usize];
         match &ty.ty {
             InnerType::Void => Ok(self.context.void_type().into()),
             &InnerType::Integer {
@@ -79,8 +77,8 @@ impl<'ctx> CodeGen<'ctx> {
             } => Ok(AnyTypeEnum::IntType(
                 self.context.custom_width_int_type(bits),
             )),
-            &InnerType::Pointer(type_id) => {
-                let ty = self.llvm_type_from_parsed_type(type_id, types)?;
+            &InnerType::Pointer(type_index) => {
+                let ty = self.llvm_type_from_parsed_type(type_index, types)?;
                 let ty: BasicTypeEnum =
                     convert_to_basic_type(ty).unwrap_or_else(|| self.context.i8_type().into());
                 Ok(AnyTypeEnum::PointerType(
@@ -88,16 +86,14 @@ impl<'ctx> CodeGen<'ctx> {
                 ))
             }
             &InnerType::Array {
-                elem_type_id,
+                elem_type_index,
                 num_elements,
                 ..
             } => {
-                let elem_ty = self.llvm_type_from_parsed_type(elem_type_id, types)?;
+                let elem_ty = self.llvm_type_from_parsed_type(elem_type_index, types)?;
                 let elem_ty: BasicTypeEnum =
                     convert_to_basic_type(elem_ty).unwrap_or_else(|| self.context.i8_type().into());
-                Ok(AnyTypeEnum::ArrayType(
-                    elem_ty.array_type(num_elements),
-                ))
+                Ok(AnyTypeEnum::ArrayType(elem_ty.array_type(num_elements)))
             }
             InnerType::Struct { .. } => {
                 let Some(name) = ty.name else {
@@ -126,18 +122,18 @@ impl<'ctx> CodeGen<'ctx> {
             InnerType::Fwd(_fwd) => {
                 bail!("Fwd not supported")
             }
-            &InnerType::Typedef(type_id)
-            | &InnerType::Volatile(type_id)
-            | &InnerType::Const(type_id)
-            | &InnerType::Restrict(type_id)
-            | &InnerType::Function { type_id, .. } => {
-                self.llvm_type_from_parsed_type(type_id, types)
+            &InnerType::Typedef(type_index)
+            | &InnerType::Volatile(type_index)
+            | &InnerType::Const(type_index)
+            | &InnerType::Restrict(type_index)
+            | &InnerType::Function { type_index, .. } => {
+                self.llvm_type_from_parsed_type(type_index, types)
             }
             InnerType::FunctionProto { ret, args } => {
                 let arg_types: Vec<BasicMetadataTypeEnum> = args
                     .iter()
                     .map(|arg| {
-                        self.llvm_type_from_parsed_type(arg.type_id, types)
+                        self.llvm_type_from_parsed_type(arg.type_index, types)
                             .unwrap_or_else(|_| self.context.i8_type().into())
                     })
                     .map(|x| {

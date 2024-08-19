@@ -1,4 +1,3 @@
-
 fn main() {
     cxx_build::bridge("src/lib.rs")
         .file("src/lib.cc")

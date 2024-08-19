@@ -4,14 +4,12 @@ use anyhow::bail;
 use anyhow::Result;
 use cxx::{CxxString, CxxVector};
 use inkwell::context::Context;
-mod btf;
+pub mod btf;
 use btf::Btf;
 mod codegen;
 use codegen::generate_function_signature;
 
-
-
-fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<Vec<String>> {
+pub fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<Vec<String>> {
     let btf = Btf::new("/sys/kernel/btf/vmlinux")?;
     let mut res = Vec::with_capacity(functions.size_hint().0);
     let ctx = Context::create();
@@ -19,7 +17,9 @@ fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Result<V
         if name.is_empty() {
             bail!("function at index {} is not valid", index);
         }
-        let fun_index = btf.type_index_by_name(name, btf::TypeKind::Function).unwrap();
+        let fun_index = btf
+            .type_index_by_name(name, btf::TypeKind::Function)
+            .unwrap();
         let Some(fun_index) = fun_index else {
             bail!("function {} not found", name);
         };

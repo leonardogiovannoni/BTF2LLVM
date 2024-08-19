@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 use anyhow::{bail, Result};
+use hashbrown::HashMap;
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
 use nom::error::ErrorKind;
@@ -15,7 +16,7 @@ use nom::{
     sequence::tuple,
     IResult,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::FxBuildHasher;
 use self_cell::self_cell;
 use smallvec::SmallVec;
 use std::ops::Not;
@@ -193,9 +194,9 @@ impl<'a> TypeInfo<'a> {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct StructMember<'a> {
+pub struct AggregateMember<'a> {
     pub name: Option<&'a str>,
-    pub type_id: u32,
+    pub type_index: u32,
     pub offset: u32,
     pub bits: Option<u32>,
 }
@@ -223,12 +224,12 @@ pub enum Linkage {
 #[derive(Clone, Debug, Default)]
 pub struct FunctionParam<'a> {
     pub name: Option<&'a str>,
-    pub type_id: u32,
+    pub type_index: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SectionVariable {
-    pub type_id: u32,
+    pub type_index: u32,
     pub offset: u32,
     pub size: u32,
 }
@@ -248,14 +249,14 @@ impl<'a> Type<'a> {
 #[derive(Clone, Debug, Default)]
 pub enum InnerType<'a> {
     Array {
-        elem_type_id: u32,
-        index_type_id: u32,
+        elem_type_index: u32,
+        index_type_index: u32,
         num_elements: u32,
     },
     Const(u32),
     DataSection(Box<[SectionVariable]>),
     DeclTag {
-        type_id: u32,
+        type_index: u32,
         component_index: u32,
     },
     Enum32 {
@@ -273,7 +274,7 @@ pub enum InnerType<'a> {
     },
     Function {
         linkage: Linkage,
-        type_id: u32,
+        type_index: u32,
     },
     FunctionProto {
         ret: u32,
@@ -291,17 +292,17 @@ pub enum InnerType<'a> {
     Restrict(u32),
     Struct {
         bytes: u32,
-        fields: Box<[StructMember<'a>]>,
+        fields: Box<[AggregateMember<'a>]>,
     },
     TypeTag(u32),
     Typedef(u32),
     Union {
         bytes: u32,
-        fields: Box<[StructMember<'a>]>,
+        fields: Box<[AggregateMember<'a>]>,
     },
     Variable {
         linkage: Linkage,
-        type_id: u32,
+        type_index: u32,
     },
     #[default]
     Void,
@@ -423,21 +424,21 @@ fn parse_function<'a>(input: &'a [u8], type_info: &TypeInfo) -> IResult<&'a [u8]
         input,
         InnerType::Function {
             linkage,
-            type_id: type_info.ref_type_checked::<{ TypeKind::Function as u8 }>(),
+            type_index: type_info.ref_type_checked::<{ TypeKind::Function as u8 }>(),
         },
     ))
 }
 
 fn parse_array(input: &[u8], en: Endianness) -> IResult<&[u8], InnerType> {
-    let (input, elem_type_id) = u32(en)(input)?;
-    let (input, index_type_id) = u32(en)(input)?;
+    let (input, elem_type_index) = u32(en)(input)?;
+    let (input, index_type_index) = u32(en)(input)?;
     let (input, num_elements) = u32(en)(input)?;
 
     Ok((
         input,
         InnerType::Array {
-            elem_type_id,
-            index_type_id,
+            elem_type_index,
+            index_type_index,
             num_elements,
         },
     ))
@@ -525,23 +526,23 @@ fn parse_struct_member<'a>(
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
     en: Endianness,
-) -> IResult<&'a [u8], StructMember<'a>> {
+) -> IResult<&'a [u8], AggregateMember<'a>> {
     let (input, name_off) = u32(en)(input)?;
     let (input, name) = read_str(input, strings, name_off)?;
-    let (input, type_id) = u32(en)(input)?;
+    let (input, type_index) = u32(en)(input)?;
     let (input, offset_and_bits) = u32(en)(input)?;
 
     let (offset, bits) = if type_info.kind_flag {
-        (offset_and_bits & 0x00FF_FFFF, Some(offset_and_bits >> 24))
+        (offset_and_bits & 0x00ff_ffff, Some(offset_and_bits >> 24))
     } else {
         (offset_and_bits, None)
     };
 
     Ok((
         input,
-        StructMember {
+        AggregateMember {
             name,
-            type_id,
+            type_index,
             offset,
             bits,
         },
@@ -595,9 +596,9 @@ fn parse_function_param<'a>(
     strings: &'a [u8],
     en: Endianness,
 ) -> IResult<&'a [u8], FunctionParam<'a>> {
-    map(tuple((u32(en), u32(en))), move |(name_off, type_id)| {
+    map(tuple((u32(en), u32(en))), move |(name_off, type_index)| {
         let (_, name) = read_str(input, strings, name_off).unwrap_or((input, None));
-        FunctionParam { name, type_id }
+        FunctionParam { name, type_index }
     })(input)
 }
 
@@ -629,8 +630,14 @@ fn parse_variable<'a>(
         1 => Ok(Linkage::Global),
         _ => Err(nom::error::ErrorKind::Tag),
     })(input)?;
-    let type_id = type_info.ref_type_checked::<{ TypeKind::Variable as u8 }>();
-    Ok((input, InnerType::Variable { type_id, linkage }))
+    let type_index = type_info.ref_type_checked::<{ TypeKind::Variable as u8 }>();
+    Ok((
+        input,
+        InnerType::Variable {
+            type_index,
+            linkage,
+        },
+    ))
 }
 
 fn parse_decl_tag<'a>(
@@ -639,25 +646,25 @@ fn parse_decl_tag<'a>(
     en: Endianness,
 ) -> IResult<&'a [u8], InnerType<'a>> {
     let (input, component_index) = u32(en)(input)?;
-    let type_id = type_info.ref_type_checked::<{ TypeKind::DeclTag as u8 }>();
+    let type_index = type_info.ref_type_checked::<{ TypeKind::DeclTag as u8 }>();
     Ok((
         input,
         InnerType::DeclTag {
-            type_id,
+            type_index,
             component_index,
         },
     ))
 }
 
 fn parse_section_variable(input: &[u8], en: Endianness) -> IResult<&[u8], SectionVariable> {
-    let (input, type_id) = u32(en)(input)?;
+    let (input, type_index) = u32(en)(input)?;
     let (input, offset) = u32(en)(input)?;
     let (input, size) = u32(en)(input)?;
 
     Ok((
         input,
         SectionVariable {
-            type_id,
+            type_index,
             offset,
             size,
         },
@@ -741,9 +748,9 @@ fn parse_types<'a>(
     type_len: u32,
     strings: &'a [u8],
     en: Endianness,
-) -> IResult<&'a [u8], Vec<Type<'a>>> {
+) -> IResult<&'a [u8], (Vec<Type<'a>>, NamesLookup<'a>)> {
     let (remaining_input, types) = preceded(take(type_off), take(type_len))(input)?;
-    let (_, parsed_types) = fold_many0(
+    let (_, (types, names_lookup)) = fold_many0(
         |i| {
             let (next_input, (kind, type_info)) = parse_type_info(i, strings, en)?;
             let (final_input, ty) = parse_type(next_input, kind, &type_info, strings, en)?;
@@ -755,15 +762,17 @@ fn parse_types<'a>(
                 },
             ))
         },
-        || vec![Type::default()],
-        |mut acc, item| {
-            acc.push(item);
-
-            acc
+        || (vec![Type::default()], NamesLookup::new()),
+        |(mut types, mut names_lookup), item| {
+            if let Some(name) = item.name {
+                names_lookup.insert(name, types.len() as u32, item.kind());
+            }
+            types.push(item);
+            (types, names_lookup)
         },
     )(types)?;
 
-    Ok((remaining_input, parsed_types))
+    Ok((remaining_input, (types, names_lookup)))
 }
 
 fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
@@ -778,35 +787,57 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
     }
 }
 
-fn create_lookup<'a>(types: &[Type<'a>]) -> FxHashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>> {
-    let mut names_lookup = FxHashMap::with_capacity_and_hasher(types.len(), Default::default());
-    for (i, ty) in types.iter().enumerate() {
-        if let Some(name) = ty.name {
-            let name = ty.name.unwrap_or_default();
-            let kind = ty.kind();
-            let tmp: &mut SmallVec<[(u32, TypeKind); 1]> =
-                names_lookup.entry(name).or_insert(Default::default());
-            tmp.push((i as u32, kind));
-        }
-    }
-    names_lookup
+/// A map from names to types.
+/// Names don't identify types uniquely, though is expected to be true for most types.
+/// We store for each name a list of types, with their kind.
+#[derive(Debug)]
+struct NamesLookup<'a> {
+    names_lookup: HashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>, FxBuildHasher>,
 }
 
-fn parse(
-    input: &[u8],
-) -> IResult<&[u8], (Vec<Type>, FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>>)> {
+impl<'a> NamesLookup<'a> {
+    fn new() -> Self {
+        Self {
+            names_lookup: Default::default(),
+        }
+    }
+
+    fn insert(&mut self, name: &'a str, index: u32, kind: TypeKind) {
+        self.names_lookup
+            .entry(name)
+            .or_default()
+            .push((index, kind));
+    }
+
+    /// we expect to be able to identify for the majority of the cases the type by name and type kind,
+    /// in case this isn't possible we bail we simply return an error
+    fn get(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
+        let Some(types_per_name) = self.names_lookup.get(name) else {
+            return Ok(None);
+        };
+        let Some((index, type_index)) = types_per_name
+            .iter()
+            .enumerate()
+            .find(|(_, &(_, k))| k == kind)
+            .map(|(index, &(type_index, _))| (index, type_index))
+        else {
+            return Ok(None);
+        };
+        if types_per_name[index + 1..].iter().any(|(_, k)| *k == kind) {
+            bail!("Not unique type found for name: {}", name);
+        };
+        Ok(Some(type_index))
+    }
+}
+
+fn parse(input: &[u8]) -> IResult<&[u8], (Vec<Type>, NamesLookup)> {
     let (input, en) = parse_magic(input)?;
     let (input, header) = parse_header(input, en)?;
     let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
-    let (input, types) = parse_types(input, header.type_off, header.type_len, strings, en)?;
-
-    let names_lookup = create_lookup(&types);
-    Ok((input, (types, names_lookup)))
+    parse_types(input, header.type_off, header.type_len, strings, en)
 }
 
-fn get_btf_types(
-    data: &[u8],
-) -> Result<(Box<[Type]>, FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>>)> {
+fn get_btf_types(data: &[u8]) -> Result<(Box<[Type]>, NamesLookup)> {
     parse(data)
         .finish()
         .map(|(_, (types, lookup))| (types.into_boxed_slice(), lookup))
@@ -814,10 +845,7 @@ fn get_btf_types(
 }
 
 #[derive(Debug)]
-struct TypesStruct<'a>(
-    Box<[Type<'a>]>,
-    FxHashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>>,
-);
+struct TypesStruct<'a>(Box<[Type<'a>]>, NamesLookup<'a>);
 
 self_cell!(
     struct BtfCell {
@@ -830,11 +858,11 @@ self_cell!(
 );
 
 impl BtfCell {
-    fn types(&self) -> &[Type<'_>] {
+    fn types(&self) -> &[Type] {
         &self.borrow_dependent().0
     }
 
-    fn names_lookup(&self) -> &FxHashMap<&str, SmallVec<[(u32, TypeKind); 1]>> {
+    fn names_lookup(&self) -> &NamesLookup {
         &self.borrow_dependent().1
     }
 }
@@ -854,21 +882,7 @@ impl Btf {
     }
 
     pub fn type_index_by_name(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
-        let Some(types_per_name) = self.0.names_lookup().get(name) else {
-            return Ok(None);
-        };
-        let Some((index, type_index)) = types_per_name
-            .iter()
-            .enumerate()
-            .find(|(_, &(_, k))| k == kind)
-            .map(|(index, &(type_index, _))| (index, type_index))
-        else {
-            return Ok(None);
-        };
-        if types_per_name[index + 1..].iter().any(|(_, k)| *k == kind) {
-            bail!("Not unique type found for name: {}", name);
-        };
-        Ok(Some(type_index))
+        self.0.names_lookup().get(name, kind)
     }
 
     //pub fn type_by_name(&self, name: &str) -> Option<&Type> {
