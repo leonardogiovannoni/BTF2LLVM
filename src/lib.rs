@@ -17,10 +17,7 @@ pub fn get_signatures_impl<'a>(functions: impl Iterator<Item = &'a str>) -> Resu
         if name.is_empty() {
             bail!("function at index {} is not valid", index);
         }
-        let fun_index = btf
-            .type_index_by_name(name, btf::TypeKind::Function)
-            .unwrap();
-        let Some(fun_index) = fun_index else {
+        let Some(fun_index) = btf.type_index_by_name(name, btf::TypeKind::Function)? else {
             bail!("function {} not found", name);
         };
         let signature = generate_function_signature(fun_index, name, btf.types(), &ctx);
