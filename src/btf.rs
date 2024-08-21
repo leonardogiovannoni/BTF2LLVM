@@ -791,7 +791,8 @@ fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
 /// Names don't identify types uniquely, though is expected to be true for most types.
 /// We store for each name a list of types, with their kind.
 #[derive(Debug)]
-struct NamesLookup<'a> {
+pub struct NamesLookup<'a> {
+    // we use a SmallVec with a single element since in > 99.7% of the cases we expect to have a single type per name
     names_lookup: HashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>, FxBuildHasher>,
 }
 
@@ -802,11 +803,39 @@ impl<'a> NamesLookup<'a> {
         }
     }
 
+    /*fn coalesce_typedefs(&mut self, types: &mut SmallVec<[(u32, TypeKind); 1]>) {
+        let mut new_types = SmallVec::new();
+        let mut typedefs: SmallVec<[u32; 2]> = SmallVec::new();
+        for (index, kind) in types.drain(..) {
+            if kind == TypeKind::Typedef {
+                typedefs.push(index);
+            } else {
+                new_types.push((index, kind));
+            }
+        }
+        *types = new_types;
+        if typedefs.is_empty() {
+            return
+        }
+        if typedefs.len() == 1 {
+            types.push((typedefs[0], TypeKind::Typedef));
+            return
+        }
+
+        if !typedefs.is_empty() {
+            new_types.extend(typedefs.into_iter().map(|index| (index, TypeKind::Typedef)));
+        }
+    }*/
+
     fn insert(&mut self, name: &'a str, index: u32, kind: TypeKind) {
-        self.names_lookup
+        let tmp = self.names_lookup
             .entry(name)
-            .or_default()
-            .push((index, kind));
+            .or_default();
+        tmp.push((index, kind));
+        //if tmp.len() > 1 {
+        //    self.coalesce_typedefs(tmp);
+        // }
+        
     }
 
     /// we expect to be able to identify for the majority of the cases the type by name and type kind,
@@ -862,7 +891,7 @@ impl BtfCell {
         &self.borrow_dependent().0
     }
 
-    fn names_lookup(&self) -> &NamesLookup {
+    pub fn names_lookup(&self) -> &NamesLookup {
         &self.borrow_dependent().1
     }
 }
@@ -875,6 +904,10 @@ impl Btf {
         Ok(Self(BtfCell::try_new(data.into_boxed_slice(), |data| {
             get_btf_types(data).map(|(x, y)| TypesStruct(x, y))
         })?))
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.names_lookup().names_lookup.keys().copied()
     }
 
     pub fn types(&self) -> &[Type<'_>] {

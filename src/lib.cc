@@ -3,11 +3,11 @@
 #include <string>
 #include <expected>
 
-std::expected<std::vector<std::string>, std::string> GetSignatures(const std::vector<std::string> &functions)
+std::expected<std::vector<std::string>, std::string> GetSignaturesVector(const std::vector<std::string> &functions)
 {
     try
     {
-        ::rust::Vec<::rust::String> res = btf2llvm::get_signatures(functions);
+        ::rust::Vec<::rust::String> res = btf2llvm::get_signatures_vector(functions);
         std::vector<std::string> result{};
         result.reserve(res.size());
         for (const auto &s : res)
@@ -22,6 +22,36 @@ std::expected<std::vector<std::string>, std::string> GetSignatures(const std::ve
     }
     return std::unexpected("Something went wrong");
 }
+
+
+std::expected<std::string, std::string> GetSignaturesString(const std::vector<std::string> &functions)
+{
+    try
+    {
+        ::rust::String res = btf2llvm::get_signatures_string(functions);
+        return (std::string) res;
+    }
+    catch (const std::exception &e)
+    {
+        return std::unexpected(e.what());
+    }
+    return std::unexpected("Something went wrong");
+}
+/*
+
+std::expected<std::string, std::string> GetSignaturesAll() {
+    try
+    {
+        ::rust::String res = btf2llvm::get_signatures_all();
+        return (std::string) res;
+    }
+    catch (const std::exception &e)
+    {
+        return std::unexpected(e.what());
+    }
+    return std::unexpected("Something went wrong");
+}*/
+
 
 /*std::expected<std::vector<std::string>, std::string> GetSignatures(const std::vector<std::string> &functions)
 {
