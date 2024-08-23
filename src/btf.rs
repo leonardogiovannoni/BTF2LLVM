@@ -882,16 +882,16 @@ struct BtfCell {
     data: Box<[u8]>,
     #[borrows(data)]
     #[covariant]
-    dependent: ParsedBtf<'this>,
+    parsed_btf: ParsedBtf<'this>,
 }
 
 impl BtfCell {
     fn types(&self) -> &[Type] {
-        &self.borrow_dependent().types_slice
+        &self.borrow_parsed_btf().types_slice
     }
 
     pub fn names_lookup(&self) -> &NamesLookup {
-        &self.borrow_dependent().names_lookup
+        &self.borrow_parsed_btf().names_lookup
     }
 }
 
@@ -901,9 +901,9 @@ impl Btf {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
         Ok(Self(BtfCell::try_new(data.into_boxed_slice(), |data| {
-            get_btf_types(data).map(|(x, y)| ParsedBtf {
-                types_slice: x,
-                names_lookup: y,
+            get_btf_types(data).map(|(types_slice, names_lookup)| ParsedBtf {
+                types_slice,
+                names_lookup,
             })
         })?))
     }
