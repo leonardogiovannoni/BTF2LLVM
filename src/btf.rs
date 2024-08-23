@@ -16,8 +16,8 @@ use nom::{
     sequence::tuple,
     IResult,
 };
+use ouroboros::self_referencing;
 use rustc_hash::FxBuildHasher;
-use self_cell::self_cell;
 use smallvec::SmallVec;
 use std::ops::Not;
 use std::path::Path;
@@ -828,14 +828,11 @@ impl<'a> NamesLookup<'a> {
     }*/
 
     fn insert(&mut self, name: &'a str, index: u32, kind: TypeKind) {
-        let tmp = self.names_lookup
-            .entry(name)
-            .or_default();
+        let tmp = self.names_lookup.entry(name).or_default();
         tmp.push((index, kind));
         //if tmp.len() > 1 {
         //    self.coalesce_typedefs(tmp);
         // }
-        
     }
 
     /// we expect to be able to identify for the majority of the cases the type by name and type kind,
@@ -874,25 +871,27 @@ fn get_btf_types(data: &[u8]) -> Result<(Box<[Type]>, NamesLookup)> {
 }
 
 #[derive(Debug)]
-struct TypesStruct<'a>(Box<[Type<'a>]>, NamesLookup<'a>);
+struct ParsedBtf<'a> {
+    types_slice: Box<[Type<'a>]>,
+    names_lookup: NamesLookup<'a>,
+}
 
-self_cell!(
-    struct BtfCell {
-        owner: Box<[u8]>,
-        #[covariant]
-        dependent: TypesStruct,
-    }
-
-    impl {Debug}
-);
+#[self_referencing]
+#[derive(Debug)]
+struct BtfCell {
+    data: Box<[u8]>,
+    #[borrows(data)]
+    #[covariant]
+    dependent: ParsedBtf<'this>,
+}
 
 impl BtfCell {
     fn types(&self) -> &[Type] {
-        &self.borrow_dependent().0
+        &self.borrow_dependent().types_slice
     }
 
     pub fn names_lookup(&self) -> &NamesLookup {
-        &self.borrow_dependent().1
+        &self.borrow_dependent().names_lookup
     }
 }
 
@@ -902,7 +901,10 @@ impl Btf {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
         Ok(Self(BtfCell::try_new(data.into_boxed_slice(), |data| {
-            get_btf_types(data).map(|(x, y)| TypesStruct(x, y))
+            get_btf_types(data).map(|(x, y)| ParsedBtf {
+                types_slice: x,
+                names_lookup: y,
+            })
         })?))
     }
 
