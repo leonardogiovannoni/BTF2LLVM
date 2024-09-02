@@ -112,11 +112,7 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 let name = format!("struct.{}", name);
                 Ok(self.context.get_struct_type(&name).map_or_else(
-                    || {
-                        AnyTypeEnum::StructType(
-                            self.context.opaque_struct_type(&name),
-                        )
-                    },
+                    || AnyTypeEnum::StructType(self.context.opaque_struct_type(&name)),
                     AnyTypeEnum::StructType,
                 ))
             }
@@ -126,11 +122,7 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 let name = format!("union.{}", name);
                 Ok(self.context.get_struct_type(&name).map_or_else(
-                    || {
-                        AnyTypeEnum::StructType(
-                            self.context.opaque_struct_type(&name),
-                        )
-                    },
+                    || AnyTypeEnum::StructType(self.context.opaque_struct_type(&name)),
                     AnyTypeEnum::StructType,
                 ))
             }

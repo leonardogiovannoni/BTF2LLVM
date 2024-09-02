@@ -24,6 +24,7 @@ use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Header {
+    _magic: u16,
     _version: u8,
     _flags: u8,
     _hdr_len: u32,
@@ -336,19 +337,37 @@ impl<'a> InnerType<'a> {
     }
 }
 
-fn parse_header(input: &[u8], en: Endianness) -> IResult<&[u8], Header> {
-    map(
+fn parse_header(input: &[u8]) -> IResult<&[u8], (Endianness, Header)> {
+    let (input, magic) = u16(Endianness::Little)(input)?;
+    let en = match magic {
+        0xeb9f => Endianness::Little,
+        0x9feb => Endianness::Big,
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                ErrorKind::Tag,
+            )))
+        }
+    };
+    let x = map(
         tuple((u8, u8, u32(en), u32(en), u32(en), u32(en), u32(en))),
-        |(_version, _flags, _hdr_len, type_off, type_len, str_off, str_len)| Header {
-            _version,
-            _flags,
-            _hdr_len,
-            type_off,
-            type_len,
-            str_off,
-            str_len,
+        |(_version, _flags, _hdr_len, type_off, type_len, str_off, str_len)| {
+            (
+                en,
+                Header {
+                    _magic: magic,
+                    _version,
+                    _flags,
+                    _hdr_len,
+                    type_off,
+                    type_len,
+                    str_off,
+                    str_len,
+                },
+            )
         },
-    )(input)
+    )(input);
+    x
 }
 
 fn read_str<'a>(
@@ -775,18 +794,6 @@ fn parse_types<'a>(
     Ok((remaining_input, (types, names_lookup)))
 }
 
-fn parse_magic(input: &[u8]) -> IResult<&[u8], Endianness> {
-    let (input, magic) = u16(Endianness::Little)(input)?;
-    match magic {
-        0xeb9f => Ok((input, Endianness::Little)),
-        0x9feb => Ok((input, Endianness::Big)),
-        _ => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            ErrorKind::Tag,
-        ))),
-    }
-}
-
 /// A map from names to types.
 /// Names don't identify types uniquely, though is expected to be true for most types.
 /// We store for each name a list of types, with their kind.
@@ -803,36 +810,9 @@ impl<'a> NamesLookup<'a> {
         }
     }
 
-    /*fn coalesce_typedefs(&mut self, types: &mut SmallVec<[(u32, TypeKind); 1]>) {
-        let mut new_types = SmallVec::new();
-        let mut typedefs: SmallVec<[u32; 2]> = SmallVec::new();
-        for (index, kind) in types.drain(..) {
-            if kind == TypeKind::Typedef {
-                typedefs.push(index);
-            } else {
-                new_types.push((index, kind));
-            }
-        }
-        *types = new_types;
-        if typedefs.is_empty() {
-            return
-        }
-        if typedefs.len() == 1 {
-            types.push((typedefs[0], TypeKind::Typedef));
-            return
-        }
-
-        if !typedefs.is_empty() {
-            new_types.extend(typedefs.into_iter().map(|index| (index, TypeKind::Typedef)));
-        }
-    }*/
-
     fn insert(&mut self, name: &'a str, index: u32, kind: TypeKind) {
         let tmp = self.names_lookup.entry(name).or_default();
         tmp.push((index, kind));
-        //if tmp.len() > 1 {
-        //    self.coalesce_typedefs(tmp);
-        // }
     }
 
     /// we expect to be able to identify for the majority of the cases the type by name and type kind,
@@ -857,8 +837,7 @@ impl<'a> NamesLookup<'a> {
 }
 
 fn parse(input: &[u8]) -> IResult<&[u8], (Vec<Type>, NamesLookup)> {
-    let (input, en) = parse_magic(input)?;
-    let (input, header) = parse_header(input, en)?;
+    let (input, (en, header)) = parse_header(input)?;
     let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
     parse_types(input, header.type_off, header.type_len, strings, en)
 }
