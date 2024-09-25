@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 use anyhow::{bail, Result};
-use hashbrown::HashMap;
+use std::collections::BTreeMap;
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
 use nom::error::ErrorKind;
@@ -432,7 +432,7 @@ fn parse_integer<'a>(
     ))
 }
 
-fn parse_function<'a>(input: &'a [u8], type_info: &TypeInfo) -> IResult<&'a [u8], InnerType<'a>> {
+fn parse_function<'a>(input: &'a [u8], type_info: &TypeInfo<'_>) -> IResult<&'a [u8], InnerType<'a>> {
     let linkage = if type_info.vlen == 0 {
         Linkage::Static
     } else {
@@ -800,7 +800,7 @@ fn parse_types<'a>(
 #[derive(Debug)]
 pub struct NamesLookup<'a> {
     // we use a SmallVec with a single element since in > 99.7% of the cases we expect to have a single type per name
-    names_lookup: HashMap<&'a str, SmallVec<[(u32, TypeKind); 1]>, FxBuildHasher>,
+    names_lookup: BTreeMap<&'a str, SmallVec<[(u32, TypeKind); 1]>>,
 }
 
 impl<'a> NamesLookup<'a> {
@@ -836,13 +836,13 @@ impl<'a> NamesLookup<'a> {
     }
 }
 
-fn parse(input: &[u8]) -> IResult<&[u8], (Vec<Type>, NamesLookup)> {
+fn parse(input: &[u8]) -> IResult<&[u8], (Vec<Type<'_>>, NamesLookup<'_>)> {
     let (input, (en, header)) = parse_header(input)?;
     let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
     parse_types(input, header.type_off, header.type_len, strings, en)
 }
 
-fn get_btf_types(data: &[u8]) -> Result<(Box<[Type]>, NamesLookup)> {
+fn get_btf_types(data: &[u8]) -> Result<(Box<[Type<'_>]>, NamesLookup<'_>)> {
     parse(data)
         .finish()
         .map(|(_, (types, lookup))| (types.into_boxed_slice(), lookup))
@@ -869,7 +869,7 @@ impl BtfCell {
         &self.borrow_parsed_btf().types_slice
     }
 
-    pub fn names_lookup(&self) -> &NamesLookup {
+    pub fn names_lookup(&self) -> &NamesLookup<'_> {
         &self.borrow_parsed_btf().names_lookup
     }
 }

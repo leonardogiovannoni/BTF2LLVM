@@ -20,9 +20,9 @@ cxx-build = "1.0.124"
 lto = "fat"
 panic = "abort"
 
-[lib]
-name = "btf2llvm"
-crate-type = ["staticlib"]
+#[lib]
+#name = "btf2llvm"
+#crate-type = ["staticlib"]
 
 #[[example]]
 #name = "dummy"
