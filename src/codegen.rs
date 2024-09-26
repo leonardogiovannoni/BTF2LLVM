@@ -33,35 +33,22 @@ pub enum SosField<'a> {
 //pub static BTF: LazyLock<Btf> = LazyLock::new(|| Btf::new("/sys/kernel/btf/vmlinux").unwrap());
 pub fn pretty_print_sos_field<'a>(
     index: ArenaIndex,
-    sos_arena: &BTreeMap<ArenaIndex, SosField<'a>>,
-    visited: &mut HashSet<ArenaIndex>,
+    sos_arena: &[SosField<'a>],
+    visited: &mut BTreeMap<ArenaIndex, ()>,
     depth: usize,
 ) -> Result<(), u32> {
+    let idx = index.0 as usize;
     let indent = "    ".repeat(depth);
-    if visited.contains(&index) {
+    if visited.contains_key(&index) {
         // Recursive type detected
-        if let Some(sos_field) = sos_arena.get(&index) {
-            println!("{}<recursive>", indent);
-        } else {
-            println!("{}<recursive unknown>", indent);
-        }
+        let sos_field = &sos_arena[idx];
+        println!("{}<recursive>", indent);
         return Ok(());
     }
 
-    let sos_field = sos_arena.get(&index);
-    let Some(sos_field) = sos_field else {
-        // Type not in sos_arena, could be base type or unknown type
-        println!(
-            "{}Unknown type (index {:?})",
-           // {:?}",
-            indent,
-            index,
-           // BTF.types()[index.0 as usize]
-        );
-        return Ok(());
-    };
+    let sos_field = &sos_arena[idx];
 
-    visited.insert(index);
+    visited.insert(index, ());
 
     match &sos_field {
         &SosField::Array {
@@ -92,7 +79,7 @@ pub fn pretty_print_sos_field<'a>(
             referred: sub_type_index,
             type_name,
         } => {
-            let sub_sos_field = sos_arena.get(&sub_type_index).unwrap();
+            let sub_sos_field = &sos_arena[sub_type_index.0 as usize];
             let fields = match &sub_sos_field {
                 SosField::Struct { fields, .. } => fields,
                 _ => unreachable!(),
@@ -109,18 +96,15 @@ pub fn pretty_print_sos_field<'a>(
     Ok(())
 }
 
-pub fn debug_sos_field<'a>(
-    index: ArenaIndex,
-    sos_arena: &BTreeMap<ArenaIndex, SosField<'a>>,
-) -> Result<(), u32> {
-    pretty_print_sos_field(index, sos_arena, &mut HashSet::new(), 0)
+pub fn debug_sos_field<'a>(index: ArenaIndex, sos_arena: &[SosField<'a>]) -> Result<(), u32> {
+    pretty_print_sos_field(index, sos_arena, &mut BTreeMap::new(), 0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Copy, Default)]
 pub struct ArenaIndex(u32);
 
 impl ArenaIndex {
-    pub fn from_u32(index: u32, btf: &Btf) -> Option<Self> {
+    pub fn from_u32(index: u32, btf: &Btf<'_>) -> Option<Self> {
         let index = strip(btf, index);
         if !eventually_resolves_to_named_struct(btf, index) {
             return None;
@@ -128,13 +112,13 @@ impl ArenaIndex {
         Some(Self(index))
     }
 
-    pub fn from_u32_only_strip(index: u32, btf: &Btf) -> Self {
+    pub fn from_u32_only_strip(index: u32, btf: &Btf<'_>) -> Self {
         let index = strip(btf, index);
         Self(index)
     }
 }
 
-fn eventually_resolves_to_named_struct(btf: &Btf, mut type_index: u32) -> bool {
+fn eventually_resolves_to_named_struct(btf: &Btf<'_>, mut type_index: u32) -> bool {
     loop {
         let ty = &btf[type_index as usize];
         match &ty.ty {
@@ -214,8 +198,7 @@ pub fn struct_analyze<'ctx>(btf: &Btf<'ctx>) -> Result<BTreeMap<ArenaIndex, SosF
                     if name.is_some() {
                         bail!("Pointer type should not have a name");
                     }
-                    let Some(sub_type_index) = ArenaIndex::from_u32(*sub_type_index, btf)
-                    else {
+                    let Some(sub_type_index) = ArenaIndex::from_u32(*sub_type_index, btf) else {
                         bail!("Pointer type does not resolve to a named struct");
                     };
                     let ptr_type = SosField::Pointer(sub_type_index);
@@ -230,8 +213,7 @@ pub fn struct_analyze<'ctx>(btf: &Btf<'ctx>) -> Result<BTreeMap<ArenaIndex, SosF
                     if name.is_some() {
                         bail!("Array type should not have a name");
                     }
-                    let Some(elem_type_index) = ArenaIndex::from_u32(*elem_type_index, btf)
-                    else {
+                    let Some(elem_type_index) = ArenaIndex::from_u32(*elem_type_index, btf) else {
                         bail!("Array element type does not resolve to a named struct");
                     };
 
@@ -299,8 +281,7 @@ pub fn struct_analyze<'ctx>(btf: &Btf<'ctx>) -> Result<BTreeMap<ArenaIndex, SosF
                             bits,
                         } in fields
                         {
-                            let Some(type_index) = ArenaIndex::from_u32(*type_index, btf)
-                            else {
+                            let Some(type_index) = ArenaIndex::from_u32(*type_index, btf) else {
                                 continue;
                             };
                             v.push(Field {
@@ -338,4 +319,53 @@ pub fn struct_analyze<'ctx>(btf: &Btf<'ctx>) -> Result<BTreeMap<ArenaIndex, SosF
         }
     }
     Ok(result_map)
+}
+
+pub fn struct_analyze2<'a>(
+    btf: &Btf<'a>,
+) -> Result<(Vec<SosField<'a>>, BTreeMap<ArenaIndex, ArenaIndex>)> {
+    let tmp = struct_analyze(btf)?;
+    let mut keys_map = BTreeMap::new();
+
+    for (new_index, &index) in tmp.keys().enumerate() {
+        keys_map.insert(index, ArenaIndex(new_index as u32));
+    }
+
+    let mut res = Vec::new();
+    for (_, v) in tmp {
+        match v {
+            SosField::Array {
+                elem_type_index,
+                num_elements,
+            } => {
+                res.push(SosField::Array {
+                    elem_type_index: keys_map[&elem_type_index],
+                    num_elements,
+                });
+            }
+            SosField::Pointer(idx) => res.push(SosField::Pointer(keys_map[&idx])),
+            SosField::Struct {
+                type_name,
+                bytes,
+                mut fields,
+            } => {
+                for field in fields.iter_mut() {
+                    field.type_index = keys_map[&field.type_index];
+                }
+                res.push(SosField::Struct {
+                type_name,
+                bytes,
+                fields,
+            })},
+            SosField::TypedefStruct {
+                type_name,
+                referred,
+            } => res.push(SosField::TypedefStruct {
+                type_name,
+                referred: keys_map[&referred],
+            }),
+        }
+    }
+
+    Ok((res, keys_map))
 }
