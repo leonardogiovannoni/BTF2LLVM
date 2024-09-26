@@ -1,31 +1,31 @@
 #![feature(const_option)]
 #![warn(rust_2018_idioms)]
 
-use anyhow::bail;
-use anyhow::Result;
-use codegen::debug_sos_field;
-use codegen::ArenaIndex;
-use codegen::CodeGen;
-use codegen::BTF;
-use cxx::{CxxString, CxxVector};
-use inkwell::context::Context;
-pub mod btf;
 use btf::Btf;
-use btf::TypeKind;
-//pub mod a;
-//use a::Btf;
-//use a::TypeKind;
+use codegen::debug_sos_field;
+use codegen::struct_analyze;
+use codegen::ArenaIndex;
+pub mod btf;
 mod codegen;
 
 
-
 fn main() {
-    let btf = &*BTF;
-    let index = btf.type_index_by_name("file", TypeKind::Struct).unwrap().unwrap();
-    let codegen = CodeGen::new(&btf);
+
+    let bytes = std::fs::read("/sys/kernel/btf/vmlinux").unwrap();
+    let btf = Btf::new(&bytes).unwrap();
     let now = std::time::Instant::now();
-    let res = codegen.struct_analyze().unwrap();
-    //println!("Time: {:?}", now.elapsed());
+    let res = struct_analyze(&btf).unwrap();
+    println!("Time: {:?}", now.elapsed());
+    let mut index = None;
+    for i in 0..btf.len() {
+        if let Some(name) = btf[i].name {
+            if name == "file" {
+                index = Some(i);
+                break;
+            }
+        }
+    }
+    let index = index.unwrap() as u32;
     let Some(arena_index ) = ArenaIndex::from_u32(index, &btf) else {
         panic!("Failed to get arena index");
     };

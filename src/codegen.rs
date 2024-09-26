@@ -1,15 +1,8 @@
 use crate::btf::{AggregateMember, Btf, Fwd, InnerType, Type, TypeKind};
 use anyhow::{bail, Result};
-use inkwell::context::Context;
-use inkwell::module::Module;
-use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::AddressSpace;
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, LazyLock};
-
-pub struct CodeGen<'ctx> {
-    btf: &'ctx Btf,
-}
 
 #[derive(Clone, Debug)]
 pub struct Field<'a> {
@@ -37,7 +30,7 @@ pub enum SosField<'a> {
     },
 }
 
-pub static BTF: LazyLock<Btf> = LazyLock::new(|| Btf::new("/sys/kernel/btf/vmlinux").unwrap());
+//pub static BTF: LazyLock<Btf> = LazyLock::new(|| Btf::new("/sys/kernel/btf/vmlinux").unwrap());
 pub fn pretty_print_sos_field<'a>(
     index: ArenaIndex,
     sos_arena: &BTreeMap<ArenaIndex, SosField<'a>>,
@@ -59,10 +52,11 @@ pub fn pretty_print_sos_field<'a>(
     let Some(sos_field) = sos_field else {
         // Type not in sos_arena, could be base type or unknown type
         println!(
-            "{}Unknown type (index {:?}) {:?}",
+            "{}Unknown type (index {:?})",
+           // {:?}",
             indent,
             index,
-            BTF.types()[index.0 as usize]
+           // BTF.types()[index.0 as usize]
         );
         return Ok(());
     };
@@ -142,13 +136,13 @@ impl ArenaIndex {
 
 fn eventually_resolves_to_named_struct(btf: &Btf, mut type_index: u32) -> bool {
     loop {
-        let ty = &btf.types()[type_index as usize];
+        let ty = &btf[type_index as usize];
         match &ty.ty {
             InnerType::Struct { .. } => {
                 return ty.name.is_some();
             }
             InnerType::Typedef(sub_type_index) => {
-                let sub_ty = &btf.types()[*sub_type_index as usize];
+                let sub_ty = &btf[*sub_type_index as usize];
                 if let InnerType::Struct { .. } = &sub_ty.ty {
                     if sub_ty.name.is_none() {
                         return true;
@@ -174,17 +168,17 @@ fn eventually_resolves_to_named_struct(btf: &Btf, mut type_index: u32) -> bool {
     }
 }
 
-fn strip(btf: &Btf, ty: u32) -> u32 {
+fn strip<'a>(btf: &Btf<'a>, ty: u32) -> u32 {
     let mut scan = ty;
     loop {
-        match &btf.types()[scan as usize].ty {
+        match &btf[scan as usize].ty {
             InnerType::Volatile(sub_type_index)
             | InnerType::Const(sub_type_index)
             | InnerType::Restrict(sub_type_index) => {
                 scan = *sub_type_index;
             }
             InnerType::Typedef(sub_type_index) => {
-                let sub_ty = &btf.types()[*sub_type_index as usize];
+                let sub_ty = &btf[*sub_type_index as usize];
                 if let InnerType::Struct { .. } = &sub_ty.ty {
                     if sub_ty.name.is_none() {
                         break scan;
@@ -197,69 +191,105 @@ fn strip(btf: &Btf, ty: u32) -> u32 {
     }
 }
 
-impl<'ctx> CodeGen<'ctx> {
-    pub fn new(btf: &'ctx Btf) -> Self {
-        Self { btf }
-    }
+pub fn struct_analyze<'ctx>(btf: &Btf<'ctx>) -> Result<BTreeMap<ArenaIndex, SosField<'ctx>>> {
+    let mut result_map = BTreeMap::new();
 
-    pub fn struct_analyze(&self) -> Result<BTreeMap<ArenaIndex, SosField<'ctx>>> {
-        let mut result_map = BTreeMap::new();
+    for type_index in 0..btf.len() {
+        let Some(type_index) = ArenaIndex::from_u32(type_index as u32, btf) else {
+            continue;
+        };
+        if result_map.contains_key(&type_index) {
+            continue;
+        }
+        let mut stack = vec![type_index];
+        let mut visited = BTreeMap::new();
 
-        for type_index in 0..self.btf.types().len() {
-            let Some(type_index) = ArenaIndex::from_u32(type_index as u32, self.btf) else {
-                continue;
-            };
-            if result_map.contains_key(&type_index) {
+        while let Some(type_index) = stack.pop() {
+            if !visited.insert(type_index, ()).is_none() {
                 continue;
             }
-            let mut stack = vec![type_index];
-            let mut visited = BTreeMap::new();
-
-            while let Some(type_index) = stack.pop() {
-                if !visited.insert(type_index, ()).is_none() {
-                    continue;
+            let Type { name, ty } = &btf[type_index.0 as usize];
+            match ty {
+                InnerType::Pointer(sub_type_index) => {
+                    if name.is_some() {
+                        bail!("Pointer type should not have a name");
+                    }
+                    let Some(sub_type_index) = ArenaIndex::from_u32(*sub_type_index, btf)
+                    else {
+                        bail!("Pointer type does not resolve to a named struct");
+                    };
+                    let ptr_type = SosField::Pointer(sub_type_index);
+                    result_map.insert(type_index, ptr_type);
+                    stack.push(sub_type_index);
                 }
-                let Type { name, ty } = &self.btf.types()[type_index.0 as usize];
-                match ty {
-                    InnerType::Pointer(sub_type_index) => {
-                        if name.is_some() {
-                            bail!("Pointer type should not have a name");
-                        }
-                        let Some(sub_type_index) = ArenaIndex::from_u32(*sub_type_index, self.btf)
-                        else {
-                            bail!("Pointer type does not resolve to a named struct");
-                        };
-                        let ptr_type = SosField::Pointer(sub_type_index);
-                        result_map.insert(type_index, ptr_type);
-                        stack.push(sub_type_index);
+                InnerType::Array {
+                    elem_type_index,
+                    num_elements,
+                    ..
+                } => {
+                    if name.is_some() {
+                        bail!("Array type should not have a name");
                     }
-                    InnerType::Array {
-                        elem_type_index,
-                        num_elements,
-                        ..
-                    } => {
-                        if name.is_some() {
-                            bail!("Array type should not have a name");
-                        }
-                        let Some(elem_type_index) =
-                            ArenaIndex::from_u32(*elem_type_index, self.btf)
-                        else {
-                            bail!("Array element type does not resolve to a named struct");
-                        };
+                    let Some(elem_type_index) = ArenaIndex::from_u32(*elem_type_index, btf)
+                    else {
+                        bail!("Array element type does not resolve to a named struct");
+                    };
 
-                        result_map.insert(
-                            type_index,
-                            SosField::Array {
-                                elem_type_index,
-                                num_elements: *num_elements,
-                            },
-                        );
-                        stack.push(elem_type_index);
-                    }
-                    InnerType::Struct { bytes, fields } => {
-                        let Some(name) = *name else {
+                    result_map.insert(
+                        type_index,
+                        SosField::Array {
+                            elem_type_index,
+                            num_elements: *num_elements,
+                        },
+                    );
+                    stack.push(elem_type_index);
+                }
+                InnerType::Struct { bytes, fields } => {
+                    let Some(name) = *name else {
+                        continue;
+                    };
+
+                    let mut v = Vec::new();
+                    for AggregateMember {
+                        name,
+                        type_index,
+                        offset,
+                        bits,
+                    } in fields
+                    {
+                        let Some(type_index) = ArenaIndex::from_u32(*type_index, btf) else {
                             continue;
                         };
+
+                        v.push(Field {
+                            variable_name: *name,
+                            type_index,
+                            offset: *offset,
+                            bits: *bits,
+                        });
+                        stack.push(type_index);
+                    }
+
+                    result_map.insert(
+                        type_index,
+                        SosField::Struct {
+                            bytes: *bytes,
+                            type_name: Some(name),
+                            fields: v.into_boxed_slice(),
+                        },
+                    );
+                }
+                InnerType::Typedef(sub_type_index) => {
+                    let sub_type_index = ArenaIndex::from_u32_only_strip(*sub_type_index, btf);
+                    let Some(name) = *name else {
+                        bail!("Typedef type does not have a name");
+                    };
+                    let sub_ty = &btf[sub_type_index.0 as usize];
+                    if let InnerType::Struct { bytes, fields } = &sub_ty.ty {
+                        if sub_ty.name.is_some() {
+                            stack.push(sub_type_index);
+                            continue;
+                        }
 
                         let mut v = Vec::new();
                         for AggregateMember {
@@ -269,11 +299,10 @@ impl<'ctx> CodeGen<'ctx> {
                             bits,
                         } in fields
                         {
-                            let Some(type_index) = ArenaIndex::from_u32(*type_index, self.btf)
+                            let Some(type_index) = ArenaIndex::from_u32(*type_index, btf)
                             else {
                                 continue;
                             };
-
                             v.push(Field {
                                 variable_name: *name,
                                 type_index,
@@ -282,75 +311,31 @@ impl<'ctx> CodeGen<'ctx> {
                             });
                             stack.push(type_index);
                         }
-
                         result_map.insert(
                             type_index,
+                            SosField::TypedefStruct {
+                                type_name: name,
+                                referred: sub_type_index,
+                            },
+                        );
+                        result_map.insert(
+                            sub_type_index,
                             SosField::Struct {
+                                type_name: None,
                                 bytes: *bytes,
-                                type_name: Some(name),
                                 fields: v.into_boxed_slice(),
                             },
                         );
-                    }
-                    InnerType::Typedef(sub_type_index) => {
-                        let sub_type_index =
-                            ArenaIndex::from_u32_only_strip(*sub_type_index, self.btf);
-                        let Some(name) = *name else {
-                            bail!("Typedef type does not have a name");
+                    } else {
+                        let Some(_) = ArenaIndex::from_u32(sub_type_index.0, btf) else {
+                            bail!("Typedef type does not resolve to a named struct");
                         };
-                        let sub_ty = &self.btf.types()[sub_type_index.0 as usize];
-                        if let InnerType::Struct { bytes, fields } = &sub_ty.ty {
-                            if sub_ty.name.is_some() {
-                                stack.push(sub_type_index);
-                                continue;
-                            }
-
-                            let mut v = Vec::new();
-                            for AggregateMember {
-                                name,
-                                type_index,
-                                offset,
-                                bits,
-                            } in fields
-                            {
-                                let Some(type_index) = ArenaIndex::from_u32(*type_index, self.btf)
-                                else {
-                                    continue;
-                                };
-                                v.push(Field {
-                                    variable_name: *name,
-                                    type_index,
-                                    offset: *offset,
-                                    bits: *bits,
-                                });
-                                stack.push(type_index);
-                            }
-                            result_map.insert(
-                                type_index,
-                                SosField::TypedefStruct {
-                                    type_name: name,
-                                    referred: sub_type_index,
-                                },
-                            );
-                            result_map.insert(
-                                sub_type_index,
-                                SosField::Struct {
-                                    type_name: None,
-                                    bytes: *bytes,
-                                    fields: v.into_boxed_slice(),
-                                },
-                            );
-                        } else {
-                            let Some(_) = ArenaIndex::from_u32(sub_type_index.0, self.btf) else {
-                                bail!("Typedef type does not resolve to a named struct");
-                            };
-                            stack.push(sub_type_index);
-                        }
+                        stack.push(sub_type_index);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
-        Ok(result_map)
     }
+    Ok(result_map)
 }

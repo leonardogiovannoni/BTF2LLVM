@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 use anyhow::{bail, Result};
-use std::collections::BTreeMap;
 use ouroboros::self_referencing;
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 use std::ops::Not;
 use std::path::Path;
 
@@ -501,10 +501,7 @@ fn parse_integer<'a>(
     })
 }
 
-fn parse_function<'a>(
-    input: &mut Parser<'a>,
-    type_info: &TypeInfo<'_>,
-) -> Result<InnerType<'a>> {
+fn parse_function<'a>(input: &mut Parser<'a>, type_info: &TypeInfo<'_>) -> Result<InnerType<'a>> {
     let linkage = if type_info.vlen == 0 {
         Linkage::Static
     } else {
@@ -639,12 +636,7 @@ fn parse_struct<'a>(
     let num_members = type_info.vlen as usize;
     let mut members = Vec::with_capacity(num_members);
     for _ in 0..num_members {
-        members.push(parse_struct_member(
-            input,
-            type_info,
-            strings,
-            en,
-        )?);
+        members.push(parse_struct_member(input, type_info, strings, en)?);
     }
     let bytes = type_info.size_checked::<{ TypeKind::Struct as u8 }>();
     Ok(InnerType::Struct {
@@ -663,12 +655,7 @@ fn parse_union<'a>(
     let num_members = type_info.vlen as usize;
     let mut members = Vec::with_capacity(num_members);
     for _ in 0..num_members {
-        members.push(parse_struct_member(
-            input,
-            type_info,
-            strings,
-            en,
-        )?);
+        members.push(parse_struct_member(input, type_info, strings, en)?);
     }
     let bytes = type_info.size_checked::<{ TypeKind::Union as u8 }>();
     Ok(InnerType::Union {
@@ -688,7 +675,6 @@ fn parse_function_param<'a>(
     let name = if name_off == 0 {
         None
     } else {
-
         let adjusted_name_off = name_off;
         read_str(strings, adjusted_name_off)?
     };
@@ -791,9 +777,7 @@ fn parse_type<'a>(
             bits: type_info.size_checked::<{ TypeKind::Float as u8 }>() * 8,
         }),
         TypeKind::Function => parse_function(input, type_info),
-        TypeKind::FunctionProto => {
-            parse_function_proto(input, type_info, strings, en)
-        }
+        TypeKind::FunctionProto => parse_function_proto(input, type_info, strings, en),
         TypeKind::Fwd => Ok(InnerType::Fwd(if type_info.kind_flag {
             Fwd::Union
         } else {
@@ -828,53 +812,36 @@ fn parse_types<'a>(
     type_len: u32,
     strings: &'a [u8],
     en: Endianness,
-) -> Result<(Vec<Type<'a>>, NamesLookup<'a>)> {
+) -> Result<Vec<Type<'a>>> {
     if type_off as usize > input.len() || type_off as usize + type_len as usize > input.len() {
         bail!("Type section out of bounds");
     }
     let types_slice = &input[type_off as usize..(type_off + type_len) as usize];
     let mut parser = Parser::new(types_slice);
     let mut types = vec![Type::default()];
-    let mut names_lookup = NamesLookup::new();
     while parser.remaining() > 0 {
-        let (kind, type_info) =
-            parse_type_info(&mut parser, strings, en)?;
-        let ty = parse_type(
-            &mut parser,
-            kind,
-            &type_info,
-            strings,
-            en,
-        )?;
+        let (kind, type_info) = parse_type_info(&mut parser, strings, en)?;
+        let ty = parse_type(&mut parser, kind, &type_info, strings, en)?;
         let item = Type {
             name: type_info.name,
             ty,
         };
-        if let Some(name) = item.name {
-            names_lookup.insert(name, types.len() as u32, item.kind());
-        }
         types.push(item);
     }
-    Ok((types, names_lookup))
+    Ok(types)
 }
 
-fn parse(input: &[u8]) -> Result<(Vec<Type<'_>>, NamesLookup<'_>)> {
+fn parse(input: &[u8]) -> Result<Vec<Type<'_>>> {
     let mut parser = Parser::new(input);
     let (en, header) = parse_header(&mut parser)?;
     let input = parser.get_current();
     let strings = &input[header.str_off as usize..(header.str_off + header.str_len) as usize];
-    parse_types(
-        input,
-        header.type_off,
-        header.type_len,
-        strings,
-        en,
-    )
+    parse_types(input, header.type_off, header.type_len, strings, en)
 }
 
-fn get_btf_types(data: &[u8]) -> Result<(Box<[Type<'_>]>, NamesLookup<'_>)> {
-    let (types, lookup) = parse(data)?;
-    Ok((types.into_boxed_slice(), lookup))
+fn get_btf_types(data: &[u8]) -> Result<Box<[Type<'_>]>> {
+    let types = parse(data)?;
+    Ok(types.into_boxed_slice())
 }
 
 /// A map from names to types.
@@ -920,53 +887,25 @@ impl<'a> NamesLookup<'a> {
 }
 
 #[derive(Debug)]
-struct ParsedBtf<'a> {
+pub struct Btf<'a> {
     types_slice: Box<[Type<'a>]>,
-    names_lookup: NamesLookup<'a>,
 }
 
-#[self_referencing]
-#[derive(Debug)]
-struct BtfCell {
-    data: Box<[u8]>,
-    #[borrows(data)]
-    #[covariant]
-    parsed_btf: ParsedBtf<'this>,
-}
-
-impl BtfCell {
-    fn types(&self) -> &[Type] {
-        &self.borrow_parsed_btf().types_slice
+impl<'a> Btf<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self> {
+        get_btf_types(bytes).map(|types_slice| Self { types_slice })
     }
 
-    pub fn names_lookup(&self) -> &NamesLookup<'_> {
-        &self.borrow_parsed_btf().names_lookup
+    pub fn len(&self) -> usize {
+        self.types_slice.len()
     }
 }
 
-pub struct Btf(BtfCell);
 
-impl Btf {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data =
-            std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
-        Ok(Self(BtfCell::try_new(data.into_boxed_slice(), |data| {
-            get_btf_types(data).map(|(types_slice, names_lookup)| ParsedBtf {
-                types_slice,
-                names_lookup,
-            })
-        })?))
-    }
+impl<'a> std::ops::Index<usize> for Btf<'a> {
+    type Output = Type<'a>;
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.names_lookup().names_lookup.keys().copied()
-    }
-
-    pub fn types(&self) -> &[Type<'_>] {
-        self.0.types()
-    }
-
-    pub fn type_index_by_name(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
-        self.0.names_lookup().get(name, kind)
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.types_slice[index]
     }
 }
