@@ -2,22 +2,7 @@
 #![allow(unused_variables)]
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
-use nom::bytes::complete::take;
-use nom::combinator::{map, map_res};
-use nom::error::ErrorKind;
-use nom::multi::{count, fold_many0};
-use nom::number::Endianness;
-use nom::sequence::preceded;
-use nom::Finish;
-use nom::{
-    bytes::complete::take_until,
-    number::complete::i32,
-    number::complete::{u16, u32, u8},
-    sequence::tuple,
-    IResult,
-};
 use ouroboros::self_referencing;
-use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 use std::ops::Not;
 use std::path::Path;
@@ -139,7 +124,6 @@ struct TypeInfo<'a> {
 }
 
 impl<'a> TypeInfo<'a> {
-    // try to move fail at compile time
     const fn size_checked<const KIND: u8>(&self) -> u32 {
         const {
             assert!(
@@ -337,219 +321,299 @@ impl<'a> InnerType<'a> {
     }
 }
 
-fn parse_header(input: &[u8]) -> IResult<&[u8], (Endianness, Header)> {
-    let (input, magic) = u16(Endianness::Little)(input)?;
+#[derive(Clone, Copy, Debug, Default)]
+enum Endianness {
+    #[default]
+    Little,
+    Big,
+}
+
+struct Parser<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Parser { data, pos: 0 }
+    }
+
+    fn get_current(&self) -> &'a [u8] {
+        &self.data[self.pos..]
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        if self.pos + 1 > self.data.len() {
+            bail!("Unexpected end of input");
+        }
+        let val = self.data[self.pos];
+        self.pos += 1;
+        Ok(val)
+    }
+
+    fn read_u16(&mut self, en: Endianness) -> Result<u16> {
+        if self.pos + 2 > self.data.len() {
+            bail!("Unexpected end of input");
+        }
+        let bytes = &self.data[self.pos..self.pos + 2];
+        self.pos += 2;
+        let val = match en {
+            Endianness::Little => u16::from_le_bytes([bytes[0], bytes[1]]),
+            Endianness::Big => u16::from_be_bytes([bytes[0], bytes[1]]),
+        };
+        Ok(val)
+    }
+
+    fn read_u32(&mut self, en: Endianness) -> Result<u32> {
+        if self.pos + 4 > self.data.len() {
+            bail!("Unexpected end of input");
+        }
+        let bytes = &self.data[self.pos..self.pos + 4];
+        self.pos += 4;
+        let val = match en {
+            Endianness::Little => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            Endianness::Big => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        };
+        Ok(val)
+    }
+
+    fn read_i32(&mut self, en: Endianness) -> Result<i32> {
+        self.read_u32(en).map(|v| v as i32)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
+        if self.pos + len > self.data.len() {
+            bail!("Unexpected end of input");
+        }
+        let bytes = &self.data[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(bytes)
+    }
+
+    fn skip(&mut self, len: usize) -> Result<()> {
+        if self.pos + len > self.data.len() {
+            bail!("Unexpected end of input");
+        }
+        self.pos += len;
+        Ok(())
+    }
+
+    fn set_pos(&mut self, pos: usize) -> Result<()> {
+        if pos > self.data.len() {
+            bail!("Position out of bounds");
+        }
+        self.pos = pos;
+        Ok(())
+    }
+}
+
+fn parse_header(input: &mut Parser<'_>) -> Result<(Endianness, Header)> {
+    let magic = input.read_u16(Endianness::Little)?;
     let en = match magic {
         0xeb9f => Endianness::Little,
         0x9feb => Endianness::Big,
-        _ => {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                ErrorKind::Tag,
-            )))
-        }
+        _ => bail!("Invalid magic number: {:#x}", magic),
     };
-    let x = map(
-        tuple((u8, u8, u32(en), u32(en), u32(en), u32(en), u32(en))),
-        |(_version, _flags, _hdr_len, type_off, type_len, str_off, str_len)| {
-            (
-                en,
-                Header {
-                    _magic: magic,
-                    _version,
-                    _flags,
-                    _hdr_len,
-                    type_off,
-                    type_len,
-                    str_off,
-                    str_len,
-                },
-            )
-        },
-    )(input);
-    x
+    let _version = input.read_u8()?;
+    let _flags = input.read_u8()?;
+    let _hdr_len = input.read_u32(en)?;
+    let type_off = input.read_u32(en)?;
+    let type_len = input.read_u32(en)?;
+    let str_off = input.read_u32(en)?;
+    let str_len = input.read_u32(en)?;
+
+    let header = Header {
+        _magic: magic,
+        _version,
+        _flags,
+        _hdr_len,
+        type_off,
+        type_len,
+        str_off,
+        str_len,
+    };
+
+    Ok((en, header))
 }
 
-fn read_str<'a>(
-    prev: &'a [u8],
-    strings: &'a [u8],
-    offset: u32,
-) -> IResult<&'a [u8], Option<&'a str>> {
-    let (input, _) = take(offset)(strings)?;
-    let (input, raw_str) = take_until("\0")(input)?;
-    match std::str::from_utf8(raw_str) {
-        Ok(s) => Ok((prev, s.is_empty().not().then_some(s))),
-        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            ErrorKind::Tag,
-        ))),
+fn read_str<'a>(strings: &'a [u8], offset: u32) -> Result<Option<&'a str>> {
+    if offset as usize >= strings.len() {
+        bail!("String offset out of bounds");
+    }
+    let s = &strings[offset as usize..];
+    if let Some(end) = s.iter().position(|&b| b == 0) {
+        let raw_str = &s[..end];
+        let s = std::str::from_utf8(raw_str)?;
+        Ok(s.is_empty().not().then_some(s))
+    } else {
+        bail!("Null terminator not found in strings section");
     }
 }
 
 fn parse_type_info<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], (TypeKind, TypeInfo<'a>)> {
-    let (input, (name_off, info, size_or_type)) = tuple((u32(en), u32(en), u32(en)))(input)?;
-    let (input, name) = read_str(input, strings, name_off)?;
-    let kind: TypeKind = u8::try_from((info >> 24) & 0x1f)
-        .unwrap()
-        .try_into()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Tag)))?;
+) -> Result<(TypeKind, TypeInfo<'a>)> {
+    let name_off = input.read_u32(en)?;
+    let info = input.read_u32(en)?;
+    let size_or_type = input.read_u32(en)?;
+
+    let adjusted_name_off = name_off;
+    let name = read_str(strings, adjusted_name_off)?;
+    let kind_u8 = ((info >> 24) & 0x1f) as u8;
+    let kind = TypeKind::try_from(kind_u8)
+        .map_err(|_| anyhow::anyhow!("Invalid TypeKind value: {}", kind_u8))?;
     let (size, ref_type) = TypeInfo::get_size_or_type(kind, size_or_type);
 
     let type_info = TypeInfo {
         name,
         vlen: info as u16,
-        kind_flag: (info >> 16) & 0x1 == 0x1,
+        kind_flag: ((info >> 16) & 0x1) == 0x1,
         size,
         ref_type,
     };
-    Ok((input, (kind, type_info)))
+    Ok((kind, type_info))
 }
 
 fn parse_integer<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
-    let (input, kind_specific) = u32(en)(input)?;
+) -> Result<InnerType<'a>> {
+    let kind_specific = input.read_u32(en)?;
     let bits = kind_specific as u8;
-    let is_signed = (kind_specific >> 24) & 0x1 == 0x1;
-    let is_char = (kind_specific >> 24) & 0x2 == 0x2;
-    let is_bool = (kind_specific >> 24) & 0x4 == 0x4;
+    let is_signed = ((kind_specific >> 24) & 0x1) == 0x1;
+    let is_char = ((kind_specific >> 24) & 0x2) == 0x2;
+    let is_bool = ((kind_specific >> 24) & 0x4) == 0x4;
 
-    Ok((
-        input,
-        InnerType::Integer {
-            bits: type_info.size_checked::<{ TypeKind::Integer as u8 }>() * 8,
-            used_bits: bits.into(),
-            is_signed,
-            is_char,
-            is_bool,
-        },
-    ))
+    Ok(InnerType::Integer {
+        bits: type_info.size_checked::<{ TypeKind::Integer as u8 }>() * 8,
+        used_bits: bits.into(),
+        is_signed,
+        is_char,
+        is_bool,
+    })
 }
 
-fn parse_function<'a>(input: &'a [u8], type_info: &TypeInfo<'_>) -> IResult<&'a [u8], InnerType<'a>> {
+fn parse_function<'a>(
+    input: &mut Parser<'a>,
+    type_info: &TypeInfo<'_>,
+) -> Result<InnerType<'a>> {
     let linkage = if type_info.vlen == 0 {
         Linkage::Static
     } else {
         Linkage::Global
     };
 
-    Ok((
-        input,
-        InnerType::Function {
-            linkage,
-            type_index: type_info.ref_type_checked::<{ TypeKind::Function as u8 }>(),
-        },
-    ))
+    Ok(InnerType::Function {
+        linkage,
+        type_index: type_info.ref_type_checked::<{ TypeKind::Function as u8 }>(),
+    })
 }
 
-fn parse_array(input: &[u8], en: Endianness) -> IResult<&[u8], InnerType> {
-    let (input, elem_type_index) = u32(en)(input)?;
-    let (input, index_type_index) = u32(en)(input)?;
-    let (input, num_elements) = u32(en)(input)?;
+fn parse_array<'a>(input: &mut Parser<'a>, en: Endianness) -> Result<InnerType<'a>> {
+    let elem_type_index = input.read_u32(en)?;
+    let index_type_index = input.read_u32(en)?;
+    let num_elements = input.read_u32(en)?;
 
-    Ok((
-        input,
-        InnerType::Array {
-            elem_type_index,
-            index_type_index,
-            num_elements,
-        },
-    ))
+    Ok(InnerType::Array {
+        elem_type_index,
+        index_type_index,
+        num_elements,
+    })
 }
 
 fn parse_enum_entry32<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], EnumEntry<'a>> {
-    let (input, name_offset) = u32(en)(input)?;
-    let (input, name) = read_str(input, strings, name_offset)?;
-    let (input, value) = i32(en)(input)?;
-    Ok((
-        input,
-        EnumEntry {
-            name,
-            value: value as i64,
-        },
-    ))
+) -> Result<EnumEntry<'a>> {
+    let name_offset = input.read_u32(en)?;
+    let adjusted_name_off = name_offset;
+    let name = read_str(strings, adjusted_name_off)?;
+    let value = input.read_i32(en)? as i64;
+    Ok(EnumEntry { name, value })
 }
 
 fn parse_enum_entry64<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], EnumEntry<'a>> {
-    let (input, name_offset) = u32(en)(input)?;
-    let (input, name) = read_str(input, strings, name_offset)?;
+) -> Result<EnumEntry<'a>> {
+    let name_offset = input.read_u32(en)?;
+    let adjusted_name_off = name_offset;
+    let name = read_str(strings, adjusted_name_off)?;
 
-    let (input, low) = i32(en)(input)?;
-    let (input, high) = i32(en)(input)?;
+    let low = input.read_i32(en)?;
+    let high = input.read_i32(en)?;
 
-    Ok((
-        input,
-        EnumEntry {
-            name,
-            value: low as i64 | ((high as i64) << 32),
-        },
-    ))
+    let value = low as i64 | ((high as i64) << 32);
+
+    Ok(EnumEntry { name, value })
 }
 
 fn parse_enum32<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let is_signed = type_info.kind_flag;
     let num_entries = type_info.vlen as usize;
-    let (input, entries) = count(|i| parse_enum_entry32(i, strings, en), num_entries)(input)?;
+    let mut entries = Vec::with_capacity(num_entries);
+    for _ in 0..num_entries {
+        entries.push(parse_enum_entry32(input, strings, en)?);
+    }
     let bytes = type_info.size_checked::<{ TypeKind::Enum32 as u8 }>();
-    Ok((
-        input,
-        InnerType::Enum32 {
-            is_signed,
-            bytes,
-            entries: entries.into_boxed_slice(),
-        },
-    ))
+    Ok(InnerType::Enum32 {
+        is_signed,
+        bytes,
+        entries: entries.into_boxed_slice(),
+    })
 }
 
 fn parse_enum64<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let is_signed = type_info.kind_flag;
     let num_entries = type_info.vlen as usize;
-    let (input, entries) = count(|i| parse_enum_entry64(i, strings, en), num_entries)(input)?;
+    let mut entries = Vec::with_capacity(num_entries);
+    for _ in 0..num_entries {
+        entries.push(parse_enum_entry64(input, strings, en)?);
+    }
     let bytes = type_info.size_checked::<{ TypeKind::Enum64 as u8 }>();
-    Ok((
-        input,
-        InnerType::Enum64 {
-            is_signed,
-            bytes,
-            entries: entries.into_boxed_slice(),
-        },
-    ))
+    Ok(InnerType::Enum64 {
+        is_signed,
+        bytes,
+        entries: entries.into_boxed_slice(),
+    })
 }
 
 fn parse_struct_member<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], AggregateMember<'a>> {
-    let (input, name_off) = u32(en)(input)?;
-    let (input, name) = read_str(input, strings, name_off)?;
-    let (input, type_index) = u32(en)(input)?;
-    let (input, offset_and_bits) = u32(en)(input)?;
+) -> Result<AggregateMember<'a>> {
+    let name_off = input.read_u32(en)?;
+    let adjusted_name_off = name_off;
+    let name = read_str(strings, adjusted_name_off)?;
+    let type_index = input.read_u32(en)?;
+    let offset_and_bits = input.read_u32(en)?;
 
     let (offset, bits) = if type_info.kind_flag {
         (offset_and_bits & 0x00ff_ffff, Some(offset_and_bits >> 24))
@@ -557,206 +621,203 @@ fn parse_struct_member<'a>(
         (offset_and_bits, None)
     };
 
-    Ok((
-        input,
-        AggregateMember {
-            name,
-            type_index,
-            offset,
-            bits,
-        },
-    ))
+    Ok(AggregateMember {
+        name,
+        type_index,
+        offset,
+        bits,
+    })
 }
 
 fn parse_struct<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let num_members = type_info.vlen as usize;
-    let (input, members) = count(
-        |input| parse_struct_member(input, type_info, strings, en),
-        num_members,
-    )(input)?;
+    let mut members = Vec::with_capacity(num_members);
+    for _ in 0..num_members {
+        members.push(parse_struct_member(
+            input,
+            type_info,
+            strings,
+            en,
+        )?);
+    }
     let bytes = type_info.size_checked::<{ TypeKind::Struct as u8 }>();
-    Ok((
-        input,
-        InnerType::Struct {
-            bytes,
-            fields: members.into_boxed_slice(),
-        },
-    ))
+    Ok(InnerType::Struct {
+        bytes,
+        fields: members.into_boxed_slice(),
+    })
 }
 
 fn parse_union<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let num_members = type_info.vlen as usize;
-    let (input, members) = count(
-        |input| parse_struct_member(input, type_info, strings, en),
-        num_members,
-    )(input)?;
+    let mut members = Vec::with_capacity(num_members);
+    for _ in 0..num_members {
+        members.push(parse_struct_member(
+            input,
+            type_info,
+            strings,
+            en,
+        )?);
+    }
     let bytes = type_info.size_checked::<{ TypeKind::Union as u8 }>();
-    Ok((
-        input,
-        InnerType::Union {
-            bytes,
-            fields: members.into_boxed_slice(),
-        },
-    ))
+    Ok(InnerType::Union {
+        bytes,
+        fields: members.into_boxed_slice(),
+    })
 }
 
 fn parse_function_param<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], FunctionParam<'a>> {
-    map(tuple((u32(en), u32(en))), move |(name_off, type_index)| {
-        let (_, name) = read_str(input, strings, name_off).unwrap_or((input, None));
-        FunctionParam { name, type_index }
-    })(input)
+) -> Result<FunctionParam<'a>> {
+    let name_off = input.read_u32(en)?;
+    let type_index = input.read_u32(en)?;
+    let name = if name_off == 0 {
+        None
+    } else {
+
+        let adjusted_name_off = name_off;
+        read_str(strings, adjusted_name_off)?
+    };
+    Ok(FunctionParam { name, type_index })
 }
 
 fn parse_function_proto<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let num_params = type_info.vlen as usize;
     let ret = type_info.ref_type_checked::<{ TypeKind::FunctionProto as u8 }>();
-    let (input, args) = count(|i| parse_function_param(i, strings, en), num_params)(input)?;
-    Ok((
-        input,
-        InnerType::FunctionProto {
-            ret,
-            args: args.into_boxed_slice(),
-        },
-    ))
+    let mut args = Vec::with_capacity(num_params);
+    for _ in 0..num_params {
+        args.push(parse_function_param(input, strings, en)?);
+    }
+    Ok(InnerType::FunctionProto {
+        ret,
+        args: args.into_boxed_slice(),
+    })
 }
 
 fn parse_variable<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
-    let (input, linkage) = map_res(u32(en), |value| match value {
-        0 => Ok(Linkage::Static),
-        1 => Ok(Linkage::Global),
-        _ => Err(nom::error::ErrorKind::Tag),
-    })(input)?;
+) -> Result<InnerType<'a>> {
+    let value = input.read_u32(en)?;
+    let linkage = match value {
+        0 => Linkage::Static,
+        1 => Linkage::Global,
+        _ => bail!("Invalid linkage value: {}", value),
+    };
     let type_index = type_info.ref_type_checked::<{ TypeKind::Variable as u8 }>();
-    Ok((
-        input,
-        InnerType::Variable {
-            type_index,
-            linkage,
-        },
-    ))
+    Ok(InnerType::Variable {
+        type_index,
+        linkage,
+    })
 }
 
 fn parse_decl_tag<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
-    let (input, component_index) = u32(en)(input)?;
+) -> Result<InnerType<'a>> {
+    let component_index = input.read_u32(en)?;
     let type_index = type_info.ref_type_checked::<{ TypeKind::DeclTag as u8 }>();
-    Ok((
-        input,
-        InnerType::DeclTag {
-            type_index,
-            component_index,
-        },
-    ))
+    Ok(InnerType::DeclTag {
+        type_index,
+        component_index,
+    })
 }
 
-fn parse_section_variable(input: &[u8], en: Endianness) -> IResult<&[u8], SectionVariable> {
-    let (input, type_index) = u32(en)(input)?;
-    let (input, offset) = u32(en)(input)?;
-    let (input, size) = u32(en)(input)?;
+fn parse_section_variable(input: &mut Parser<'_>, en: Endianness) -> Result<SectionVariable> {
+    let type_index = input.read_u32(en)?;
+    let offset = input.read_u32(en)?;
+    let size = input.read_u32(en)?;
 
-    Ok((
-        input,
-        SectionVariable {
-            type_index,
-            offset,
-            size,
-        },
-    ))
+    Ok(SectionVariable {
+        type_index,
+        offset,
+        size,
+    })
 }
 
 fn parse_data_section<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     type_info: &TypeInfo<'a>,
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     let num_vars = type_info.vlen as usize;
-    let (input, vars) = count(|i| parse_section_variable(i, en), num_vars)(input)?;
-    Ok((input, InnerType::DataSection(vars.into_boxed_slice())))
+    let mut vars = Vec::with_capacity(num_vars);
+    for _ in 0..num_vars {
+        vars.push(parse_section_variable(input, en)?);
+    }
+    Ok(InnerType::DataSection(vars.into_boxed_slice()))
 }
 
 fn parse_type<'a>(
-    input: &'a [u8],
+    input: &mut Parser<'a>,
     kind: TypeKind,
     type_info: &TypeInfo<'a>,
     strings: &'a [u8],
+
     en: Endianness,
-) -> IResult<&'a [u8], InnerType<'a>> {
+) -> Result<InnerType<'a>> {
     match kind {
         TypeKind::Array => parse_array(input, en),
-        TypeKind::Const => Ok((
-            input,
-            InnerType::Const(type_info.ref_type_checked::<{ TypeKind::Const as u8 }>()),
+        TypeKind::Const => Ok(InnerType::Const(
+            type_info.ref_type_checked::<{ TypeKind::Const as u8 }>(),
         )),
         TypeKind::DataSection => parse_data_section(input, type_info, en),
         TypeKind::DeclTag => parse_decl_tag(input, type_info, en),
         TypeKind::Enum32 => parse_enum32(input, type_info, strings, en),
         TypeKind::Enum64 => parse_enum64(input, type_info, strings, en),
-        TypeKind::Float => Ok((
-            input,
-            InnerType::Float {
-                bits: type_info.size_checked::<{ TypeKind::Float as u8 }>() * 8,
-            },
-        )),
+        TypeKind::Float => Ok(InnerType::Float {
+            bits: type_info.size_checked::<{ TypeKind::Float as u8 }>() * 8,
+        }),
         TypeKind::Function => parse_function(input, type_info),
-        TypeKind::FunctionProto => parse_function_proto(input, type_info, strings, en),
-        TypeKind::Fwd => Ok((
-            input,
-            InnerType::Fwd(if type_info.kind_flag {
-                Fwd::Union
-            } else {
-                Fwd::Struct
-            }),
-        )),
+        TypeKind::FunctionProto => {
+            parse_function_proto(input, type_info, strings, en)
+        }
+        TypeKind::Fwd => Ok(InnerType::Fwd(if type_info.kind_flag {
+            Fwd::Union
+        } else {
+            Fwd::Struct
+        })),
         TypeKind::Integer => parse_integer(input, type_info, en),
-        TypeKind::Pointer => Ok((
-            input,
-            InnerType::Pointer(type_info.ref_type_checked::<{ TypeKind::Pointer as u8 }>()),
+        TypeKind::Pointer => Ok(InnerType::Pointer(
+            type_info.ref_type_checked::<{ TypeKind::Pointer as u8 }>(),
         )),
-        TypeKind::Restrict => Ok((
-            input,
-            InnerType::Restrict(type_info.ref_type_checked::<{ TypeKind::Restrict as u8 }>()),
+        TypeKind::Restrict => Ok(InnerType::Restrict(
+            type_info.ref_type_checked::<{ TypeKind::Restrict as u8 }>(),
         )),
         TypeKind::Struct => parse_struct(input, type_info, strings, en),
-        TypeKind::TypeTag => Ok((
-            input,
-            InnerType::TypeTag(type_info.ref_type_checked::<{ TypeKind::TypeTag as u8 }>()),
+        TypeKind::TypeTag => Ok(InnerType::TypeTag(
+            type_info.ref_type_checked::<{ TypeKind::TypeTag as u8 }>(),
         )),
-        TypeKind::Typedef => Ok((
-            input,
-            InnerType::Typedef(type_info.ref_type_checked::<{ TypeKind::Typedef as u8 }>()),
+        TypeKind::Typedef => Ok(InnerType::Typedef(
+            type_info.ref_type_checked::<{ TypeKind::Typedef as u8 }>(),
         )),
         TypeKind::Union => parse_union(input, type_info, strings, en),
         TypeKind::Variable => parse_variable(input, type_info, en),
-        TypeKind::Void => Ok((input, InnerType::Void)),
-        TypeKind::Volatile => Ok((
-            input,
-            InnerType::Volatile(type_info.ref_type_checked::<{ TypeKind::Volatile as u8 }>()),
+        TypeKind::Void => Ok(InnerType::Void),
+        TypeKind::Volatile => Ok(InnerType::Volatile(
+            type_info.ref_type_checked::<{ TypeKind::Volatile as u8 }>(),
         )),
     }
 }
@@ -767,31 +828,53 @@ fn parse_types<'a>(
     type_len: u32,
     strings: &'a [u8],
     en: Endianness,
-) -> IResult<&'a [u8], (Vec<Type<'a>>, NamesLookup<'a>)> {
-    let (remaining_input, types) = preceded(take(type_off), take(type_len))(input)?;
-    let (_, (types, names_lookup)) = fold_many0(
-        |i| {
-            let (next_input, (kind, type_info)) = parse_type_info(i, strings, en)?;
-            let (final_input, ty) = parse_type(next_input, kind, &type_info, strings, en)?;
-            Ok((
-                final_input,
-                Type {
-                    name: type_info.name,
-                    ty,
-                },
-            ))
-        },
-        || (vec![Type::default()], NamesLookup::new()),
-        |(mut types, mut names_lookup), item| {
-            if let Some(name) = item.name {
-                names_lookup.insert(name, types.len() as u32, item.kind());
-            }
-            types.push(item);
-            (types, names_lookup)
-        },
-    )(types)?;
+) -> Result<(Vec<Type<'a>>, NamesLookup<'a>)> {
+    if type_off as usize > input.len() || type_off as usize + type_len as usize > input.len() {
+        bail!("Type section out of bounds");
+    }
+    let types_slice = &input[type_off as usize..(type_off + type_len) as usize];
+    let mut parser = Parser::new(types_slice);
+    let mut types = vec![Type::default()];
+    let mut names_lookup = NamesLookup::new();
+    while parser.remaining() > 0 {
+        let (kind, type_info) =
+            parse_type_info(&mut parser, strings, en)?;
+        let ty = parse_type(
+            &mut parser,
+            kind,
+            &type_info,
+            strings,
+            en,
+        )?;
+        let item = Type {
+            name: type_info.name,
+            ty,
+        };
+        if let Some(name) = item.name {
+            names_lookup.insert(name, types.len() as u32, item.kind());
+        }
+        types.push(item);
+    }
+    Ok((types, names_lookup))
+}
 
-    Ok((remaining_input, (types, names_lookup)))
+fn parse(input: &[u8]) -> Result<(Vec<Type<'_>>, NamesLookup<'_>)> {
+    let mut parser = Parser::new(input);
+    let (en, header) = parse_header(&mut parser)?;
+    let input = parser.get_current();
+    let strings = &input[header.str_off as usize..(header.str_off + header.str_len) as usize];
+    parse_types(
+        input,
+        header.type_off,
+        header.type_len,
+        strings,
+        en,
+    )
+}
+
+fn get_btf_types(data: &[u8]) -> Result<(Box<[Type<'_>]>, NamesLookup<'_>)> {
+    let (types, lookup) = parse(data)?;
+    Ok((types.into_boxed_slice(), lookup))
 }
 
 /// A map from names to types.
@@ -836,19 +919,6 @@ impl<'a> NamesLookup<'a> {
     }
 }
 
-fn parse(input: &[u8]) -> IResult<&[u8], (Vec<Type<'_>>, NamesLookup<'_>)> {
-    let (input, (en, header)) = parse_header(input)?;
-    let (_, strings) = preceded(take(header.str_off), take(header.str_len))(input)?;
-    parse_types(input, header.type_off, header.type_len, strings, en)
-}
-
-fn get_btf_types(data: &[u8]) -> Result<(Box<[Type<'_>]>, NamesLookup<'_>)> {
-    parse(data)
-        .finish()
-        .map(|(_, (types, lookup))| (types.into_boxed_slice(), lookup))
-        .map_err(|e| anyhow::anyhow!("error parsing btf: {:?}", e.code))
-}
-
 #[derive(Debug)]
 struct ParsedBtf<'a> {
     types_slice: Box<[Type<'a>]>,
@@ -878,7 +948,8 @@ pub struct Btf(BtfCell);
 
 impl Btf {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
+        let data =
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read btf: {}", e))?;
         Ok(Self(BtfCell::try_new(data.into_boxed_slice(), |data| {
             get_btf_types(data).map(|(types_slice, names_lookup)| ParsedBtf {
                 types_slice,
@@ -898,8 +969,4 @@ impl Btf {
     pub fn type_index_by_name(&self, name: &str, kind: TypeKind) -> Result<Option<u32>> {
         self.0.names_lookup().get(name, kind)
     }
-
-    //pub fn type_by_name(&self, name: &str) -> Option<&Type> {
-    //    self.type_index_by_name(name).map(|i| &self.types()[i])
-    // }
 }

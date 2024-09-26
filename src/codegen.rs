@@ -1,4 +1,4 @@
-use crate::btf::{Btf, Fwd, InnerType, Type, TypeKind};
+use crate::btf::{AggregateMember, Btf, Fwd, InnerType, Type, TypeKind};
 use anyhow::{bail, Result};
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -140,13 +140,8 @@ impl ArenaIndex {
     }
 }
 
-fn eventually_resolves_to_named_struct(btf: &Btf, type_index: u32) -> bool {
-    let mut visited = BTreeMap::new();
-    let mut v = vec![type_index];
-    while let Some(type_index) = v.pop() {
-        if !visited.insert(type_index, ()).is_none() {
-            continue;
-        }
+fn eventually_resolves_to_named_struct(btf: &Btf, mut type_index: u32) -> bool {
+    loop {
         let ty = &btf.types()[type_index as usize];
         match &ty.ty {
             InnerType::Struct { .. } => {
@@ -159,25 +154,24 @@ fn eventually_resolves_to_named_struct(btf: &Btf, type_index: u32) -> bool {
                         return true;
                     }
                 }
-                v.push(*sub_type_index);
+                type_index = *sub_type_index;
             }
             InnerType::Pointer(sub_type_index)
             | InnerType::Volatile(sub_type_index)
             | InnerType::Const(sub_type_index)
             | InnerType::Restrict(sub_type_index) => {
-                v.push(*sub_type_index);
+                type_index = *sub_type_index;
             }
             InnerType::Array {
                 elem_type_index, ..
             } => {
-                v.push(*elem_type_index);
+                type_index = *elem_type_index;
             }
             _ => {
                 return false;
             }
         }
     }
-    false
 }
 
 fn strip(btf: &Btf, ty: u32) -> u32 {
@@ -267,8 +261,8 @@ impl<'ctx> CodeGen<'ctx> {
                             continue;
                         };
 
-                        let mut struct_fields = Vec::new();
-                        for crate::btf::AggregateMember {
+                        let mut v = Vec::new();
+                        for AggregateMember {
                             name,
                             type_index,
                             offset,
@@ -280,7 +274,12 @@ impl<'ctx> CodeGen<'ctx> {
                                 continue;
                             };
 
-                            struct_fields.push((name, type_index, *offset, *bits));
+                            v.push(Field {
+                                variable_name: *name,
+                                type_index,
+                                offset: *offset,
+                                bits: *bits,
+                            });
                             stack.push(type_index);
                         }
 
@@ -289,17 +288,7 @@ impl<'ctx> CodeGen<'ctx> {
                             SosField::Struct {
                                 bytes: *bytes,
                                 type_name: Some(name),
-                                fields: struct_fields
-                                    .iter()
-                                    .map(|&(&variable_name, type_index, offset, bits)| {
-                                        Field {
-                                            variable_name,
-                                            type_index,
-                                            offset,
-                                            bits,
-                                        }
-                                    })
-                                    .collect::<Box<[Field<'_>]>>(),
+                                fields: v.into_boxed_slice(),
                             },
                         );
                     }
@@ -316,8 +305,8 @@ impl<'ctx> CodeGen<'ctx> {
                                 continue;
                             }
 
-                            let mut struct_fields = Vec::new();
-                            for crate::btf::AggregateMember {
+                            let mut v = Vec::new();
+                            for AggregateMember {
                                 name,
                                 type_index,
                                 offset,
@@ -328,7 +317,12 @@ impl<'ctx> CodeGen<'ctx> {
                                 else {
                                     continue;
                                 };
-                                struct_fields.push((name, type_index, *offset, *bits));
+                                v.push(Field {
+                                    variable_name: *name,
+                                    type_index,
+                                    offset: *offset,
+                                    bits: *bits,
+                                });
                                 stack.push(type_index);
                             }
                             result_map.insert(
@@ -343,17 +337,7 @@ impl<'ctx> CodeGen<'ctx> {
                                 SosField::Struct {
                                     type_name: None,
                                     bytes: *bytes,
-                                    fields: struct_fields
-                                        .iter()
-                                        .map(|&(&variable_name, type_index, offset, bits)| {
-                                            Field {
-                                                variable_name,
-                                                type_index,
-                                                offset,
-                                                bits,
-                                            }
-                                        })
-                                        .collect::<Box<[Field<'_>]>>(),
+                                    fields: v.into_boxed_slice(),
                                 },
                             );
                         } else {
@@ -369,6 +353,4 @@ impl<'ctx> CodeGen<'ctx> {
         }
         Ok(result_map)
     }
-
-
 }
